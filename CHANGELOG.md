@@ -2,6 +2,7 @@
 
 ## Unreleased
 - Farm window: items for which the addon's own price (the one the tooltip shows) is newer than the bundled farm data use that newer auction price (gathering, mobs, fishing and crafting). Without a newer price the numbers are unchanged.
+- Daily price history from your own scans: every search and full scan records, per item and day, the highest and lowest of the lowest prices and the most listed (21 days, up to 10,000 items per auction house; guild prices are not recorded). Deals measure "well under the usual price" against your own history once it covers 5 days, else the bundled history, and say which. Saved data: `AHProfitDB.v = 2`, `AHProfitDB.hist`.
 - Guild sharing: received prices are kept in their own layer and never overwrite or delete your own scans. Your own scan wins while it is under 2 hours old, whatever the bundled snapshot's age; after that a newer guild scan is shown, as `guild (Name, 20m ago)`. Scans timed more than 5 minutes ahead or more than 12 hours behind your clock are refused, only your own scans are passed on, received prices older than 12 hours are dropped, a complete newer guild scan replaces the older received prices, and the shared layer is capped (60,000 items, 8 auction houses). Saved data: `AHProfitDB.v = 1`, `AHProfitDB.shared`.
 
 ## 0.5.3

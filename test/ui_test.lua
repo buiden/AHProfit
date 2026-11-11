@@ -468,6 +468,19 @@ do
         ok("deals head counts them", plain(U.head:GetText()):find("below vendor price", 1, true), U.head:GetText())
         price(900002, was, 9)
         price(900001, 600, 50)                                   -- the history test above removed its price
+        -- a dip from your own daily history says where its usual price comes from
+        local Hh = n2.histHouse and n2.histHouse()
+        if Hh then
+            local sd = n2.scanDay(W.time)
+            Hh[900001] = { h = { [sd - 4] = 2000, [sd - 3] = 2000, [sd - 2] = 2000, [sd - 1] = 2000, [sd] = 2000 }, l = {}, a = {} }
+            U.tabs.deals.scripts.OnClick[1]()
+            local dipE
+            for _, e in ipairs(U.entries) do if e.left == "Test Ore" then dipE = e end end
+            local dl = dipE and dipE.detail() or {}
+            local txt = plain(table.concat(dl, "\n"))
+            ok("own-history dip detail names its source", txt:find("over 5 days, from your own scans", 1, true), txt)
+            Hh[900001] = nil
+        else ok("own-history dip detail names its source", false, "no history") end
         AHProfitDB.auc = { own = { [X.me()] = { t = W.time, list = { { 900001, 10, 700, 0 }, { 900003, 1, 900, 1 } } } } }
         U.tabs.auc.scripts.OnClick[1]()
         ok("auctions tab lists own auctions, sold first", #U.entries == 2 and U.entries[1].left == "Half Bound Sword" and U.entries[1].sub == "sold, gold waiting" and U.entries[2].sub == "someone is cheaper", #U.entries)

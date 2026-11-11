@@ -43,21 +43,22 @@ local function live()
 end
 ns.live = live
 
+-- Saved-data version (DB.v): 1 added DB.shared (guild prices), 2 added DB.hist (daily history of your own scans).
+-- A save written by a newer version (DB.v > KNOWN_V) is left untouched; this version then uses neither layer, and
+-- neither stores nor shows received prices (ns.sharedOK() is false; Sync.lua refuses them).
 -- Prices received from guild members (Sync.lua) live in their own layer, one per auction house: they never change
--- or delete your own scans. DB.v 1 introduced it; from = { [scan time] = sender name }. A save written by a newer
--- version (DB.v > 1) is left untouched, and this version then neither stores nor shows received prices
--- (ns.sharedOK() is false; Sync.lua refuses them). Received prices older than 12 hours are dropped.
-local SHARED_V, MAX_HOUSES, SHARED_KEEP = 1, 8, 43200
+-- or delete your own scans. from = { [scan time] = sender name }. Received prices older than 12 hours are dropped.
+local KNOWN_V, MAX_HOUSES, SHARED_KEEP = 2, 8, 43200
 local spare = { p = {}, q = {}, t = {}, full = 0, from = {} }
 local function shared()
-    if DB.v ~= SHARED_V then return spare end
+    if DB.v ~= KNOWN_V then return spare end
     local k = houseKey()
     local H = DB.shared[k]
     if not H then H = { p = {}, q = {}, t = {}, full = 0, from = {} }; DB.shared[k] = H end
     return H
 end
 ns.shared = shared
-ns.sharedOK = function() return DB ~= nil and DB.v == SHARED_V end
+ns.sharedOK = function() return DB ~= nil and DB.v == KNOWN_V end
 local function okNum(v, max) return type(v) == "number" and v >= 0 and v <= max and v == math.floor(v) end
 -- Drops received prices older than 12 hours and sender names no stored price uses. Returns the item count.
 local function pruneShared(H)
@@ -72,10 +73,14 @@ local function pruneShared(H)
 end
 ns.pruneShared = pruneShared
 -- Checks the saved shared layer at load: wrong types are dropped, at most MAX_HOUSES houses (the newest kept).
+local loadHist
 local function loadShared()
-    if type(DB.v) == "number" and DB.v > SHARED_V then return end
-    if DB.v ~= SHARED_V or type(DB.shared) ~= "table" then DB.shared = {} end
-    DB.v = SHARED_V
+    if type(DB.v) == "number" and DB.v > KNOWN_V then return end
+    local v = type(DB.v) == "number" and DB.v or 0
+    if v < 1 or type(DB.shared) ~= "table" then DB.shared = {} end
+    if v < 2 or type(DB.hist) ~= "table" then DB.hist = {} end
+    DB.v = KNOWN_V
+    loadHist()
     local keys = {}
     for k, H in pairs(DB.shared) do
         if type(k) ~= "string" or type(H) ~= "table" then DB.shared[k] = nil
@@ -139,6 +144,90 @@ local function srcLabel(src, t, from)
 end
 ns.srcLabel = srcLabel
 
+-- ------------------------------------------------------------------ daily history of your own auction house scans --
+-- DB.hist[house][itemID] = { h = {}, l = {}, a = {} }, each keyed by scan day (whole days since 2020-01-01 UTC):
+-- h = the highest of the day's lowest prices, l = the lowest one (kept only when below h), a = the most listed.
+-- Written from every own browse result, full scans and searches alike, once per query with that query's lowest
+-- price per item. Guild prices never enter it. Kept 21 days; at most HIST_ITEMS items per house, 8 houses.
+local DAY0, HIST_DAYS, HIST_ITEMS = 1577836800, 21, 10000
+ns.HIST_ITEMS = HIST_ITEMS
+local function scanDay(t) return math.floor((t - DAY0) / 86400) end
+ns.scanDay = scanDay
+local histCount = setmetatable({}, { __mode = "k" })
+local function histHouse()
+    if DB.v ~= KNOWN_V then return nil end
+    local k = houseKey()
+    local H = DB.hist[k]
+    if not H then H = {}; DB.hist[k] = H; histCount[H] = 0 end
+    if not histCount[H] then local n = 0; for _ in pairs(H) do n = n + 1 end; histCount[H] = n end
+    return H
+end
+ns.histHouse = histHouse
+local function prune(e, oldest)
+    local any = false
+    for _, f in ipairs({ "h", "l", "a" }) do
+        for d in pairs(e[f]) do if d < oldest then e[f][d] = nil elseif f == "h" then any = true end end
+    end
+    return any
+end
+local function histAdd(H, id, p, q, day)
+    local e = H[id]
+    if not e then
+        if histCount[H] >= ns.HIST_ITEMS then return end
+        e = { h = {}, l = {}, a = {} }; H[id] = e; histCount[H] = histCount[H] + 1
+    end
+    local hi, lo = e.h[day], e.l[day] or e.h[day]
+    hi = (hi and hi > p) and hi or p
+    lo = (lo and lo < p) and lo or p
+    e.h[day] = hi
+    e.l[day] = lo < hi and lo or nil
+    if q > (e.a[day] or -1) then e.a[day] = q end
+    prune(e, day - HIST_DAYS + 1)
+end
+-- Daily prices of one item from your own scans, oldest first: { { d = day, p = h, l = l or h, a = a }, ... }.
+function ns.histOwn(id)
+    local H = histHouse()
+    local e = H and H[id]
+    if not e then return {} end
+    local out = {}
+    for d, h in pairs(e.h) do out[#out + 1] = { d = d, p = h, l = e.l[d] or h, a = e.a[d] or 0 } end
+    table.sort(out, function(a, b) return a.d < b.d end)
+    return out
+end
+-- At load: wrong types dropped, days older than 21 dropped, the item cap and the newest 8 houses kept.
+loadHist = function()
+    local today = scanDay(now())
+    local oldest, keys = today - HIST_DAYS + 1, {}
+    for k, H in pairs(DB.hist) do
+        if type(k) ~= "string" or type(H) ~= "table" then DB.hist[k] = nil
+        else
+            local n, newest = 0, -1
+            for id, e in pairs(H) do
+                local good = okNum(id, 1e7) and type(e) == "table" and type(e.h) == "table"
+                if good then
+                    if type(e.l) ~= "table" then e.l = {} end
+                    if type(e.a) ~= "table" then e.a = {} end
+                    for d, p in pairs(e.h) do if not (okNum(d, 1e5) and d <= today and okNum(p, 1e12) and p > 0) then e.h[d] = nil end end
+                    for d, p in pairs(e.l) do if not (e.h[d] and okNum(p, 1e12) and p > 0 and p < e.h[d]) then e.l[d] = nil end end
+                    for d, a in pairs(e.a) do if not (e.h[d] and okNum(a, 1e9)) then e.a[d] = nil end end
+                    good = prune(e, oldest)
+                end
+                if not good or n >= HIST_ITEMS then H[id] = nil
+                else
+                    n = n + 1
+                    for d in pairs(e.h) do if d > newest then newest = d end end
+                end
+            end
+            histCount[H] = n
+            keys[#keys + 1] = { k = k, newest = newest }
+        end
+    end
+    if #keys > MAX_HOUSES then
+        table.sort(keys, function(a, b) return a.newest > b.newest end)
+        for i = MAX_HOUSES + 1, #keys do DB.hist[keys[i].k] = nil end
+    end
+end
+
 local GREY, WHITE, GREEN, RED = { .6, .6, .6 }, { 1, 1, 1 }, { .25, 1, .25 }, { 1, .3, .3 }
 local function line(tt, l, r, lc, rc)
     tt:AddDoubleLine(l, r, lc[1], lc[2], lc[3], rc[1], rc[2], rc[3])
@@ -189,6 +278,18 @@ end
 -- ------------------------------------------------------------------ recording the auction house while it is open --
 local open, scanning, waitingThrottle, pendingStart = false, false, false, false
 local scanId, seen, scanCount = 0, {}, 0
+local pend = {}                    -- items seen in the current query, written to the daily history when it ends
+local function flushHist()
+    local H = next(pend) and histHouse()
+    if H then
+        local L, day = live(), scanDay(now())
+        for id in pairs(pend) do
+            local p, q = L.p[id], L.q[id]
+            if p then histAdd(H, id, p, q or 0, day) end
+        end
+    end
+    pend = {}
+end
 
 local function record(results)
     if type(results) ~= "table" then return end
@@ -205,12 +306,14 @@ local function record(results)
                 seen[id] = scanId; scanCount = scanCount + 1
                 L.p[id], L.q[id], L.t[id] = price, q, t
             end
+            pend[id] = true
         end
     end
 end
 
 local function finish()
     scanning = false
+    flushHist()
     local L, known = live(), 0
     for _ in pairs(L.p) do known = known + 1 end
     -- Only a scan that plausibly covered the whole house may forget items; a narrow search must not wipe the rest.
@@ -310,8 +413,10 @@ f:SetScript("OnEvent", function(_, ev, a1)
         open = true
         if DB.autoscan and C_AuctionHouse and C_AuctionHouse.SendBrowseQuery and now() - math.max(live().full, shared().full) > 900 then C_Timer.After(1, function() if open and not scanning then startScan(true) end end) end
     elseif ev == "AUCTION_HOUSE_CLOSED" then
+        flushHist()
         open, scanning, waitingThrottle, pendingStart = false, false, false, false
     elseif ev == "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED" then
+        flushHist()                                              -- a new query: the previous one is complete
         scanId = scanId + 1; scanCount = 0
         record(C_AuctionHouse.GetBrowseResults())
         page()

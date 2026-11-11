@@ -137,7 +137,9 @@ local function median(ps)
 end
 X.DIP = 0.75
 -- kind "vendor": the lowest auction is below what a vendor pays, so buying it and vendoring it gains `gain` each.
--- kind "dip": a material is at or below 75% of its own usual price (the middle of its daily prices, 5 days or more).
+-- kind "dip": an item is at or below 75% of its own usual price (the middle of its daily prices, 5 days or more).
+-- Daily prices come from your own scans (ns.histOwn, the day's highest low) when they cover 5 days or more, else
+-- from the bundled History.lua; own = true says which.
 function X.deals()
     local D, out = db(), {}
     if not D or not Tl then return out end
@@ -149,16 +151,30 @@ function X.deals()
             if p and p < v then out[#out + 1] = { kind = "vendor", id = id, name = itemName(id), price = p, vendor = v, gain = v - p, qty = q or 0, t = t, src = src, from = from } end
         end
     end
-    for _, m in ipairs(Tl.histList()) do
-        local s = Tl.histSeries(m.idx)
-        if s and #s.pts >= 5 then
-            local now, q, t, src, from = ns.lookup(m.id)
-            if now then
-                local ps = {}
-                for i, p in ipairs(s.pts) do ps[i] = p.p end
-                local med = median(ps)
-                if now <= med * X.DIP then
-                    out[#out + 1] = { kind = "dip", id = m.id, name = m.name, price = now, usual = med, days = #ps, below = 1 - now / med, qty = q or 0, t = t, src = src, from = from }
+    local cands, done = {}, {}
+    local H = ns.histHouse and ns.histHouse()
+    if H then for id in pairs(H) do cands[#cands + 1] = { id = id } end end
+    for _, m in ipairs(Tl.histList()) do cands[#cands + 1] = { id = m.id, name = m.name, idx = m.idx } end
+    for _, c in ipairs(cands) do
+        if not done[c.id] then
+            local ps, own = {}, false
+            local mine = ns.histOwn and ns.histOwn(c.id) or {}
+            if #mine >= 5 then
+                own = true
+                for i, p in ipairs(mine) do ps[i] = p.p end
+            elseif c.idx then
+                local s = Tl.histSeries(c.idx)
+                if s then for i, p in ipairs(s.pts) do ps[i] = p.p end end
+            end
+            if #ps >= 5 then
+                done[c.id] = true
+                local now, q, t, src, from = ns.lookup(c.id)
+                if now then
+                    local med = median(ps)
+                    if now <= med * X.DIP then
+                        out[#out + 1] = { kind = "dip", id = c.id, name = c.name or itemName(c.id), price = now, usual = med, days = #ps, own = own,
+                            below = 1 - now / med, qty = q or 0, t = t, src = src, from = from }
+                    end
                 end
             end
         end

@@ -148,4 +148,80 @@ do
 end
 SlashCmdList.AHPROFIT("cut 15"); ok("slash cut", AHProfitDB.cut == 15); SlashCmdList.AHPROFIT("cut 99"); ok("bad cut ignored", AHProfitDB.cut == 15)
 SlashCmdList.AHPROFIT(""); ok("status prints", chat[#chat]:find("/ahp farm | scan", 1, true))
+-- ---- PR-B: daily history of your own scans (AHProfitDB.hist), Auctionator's day rules
+do
+    local hasHist = type(ns.histOwn) == "function" and type(ns.scanDay) == "function"
+    ok("history: saved data version 2 with a history table", AHProfitDB.v == 2 and type(AHProfitDB.hist) == "table", tostring(AHProfitDB.v))
+    ok("history: scan day = whole UTC days since 2020-01-01", hasHist and ns.scanDay(1577836800) == 0 and ns.scanDay(1577836800 + 86399) == 0 and ns.scanDay(1577836800 + 86400) == 1 and ns.scanDay(1794385517) == 2506)
+    local own = function(id) return hasHist and ns.histOwn(id) or {} end
+    local function query(rows) S.pages = { rows }; fire("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED") end
+    fire("AUCTION_HOUSE_CLOSED"); fire("AUCTION_HOUSE_SHOW"); timers = {}
+    local day = hasHist and ns.scanDay(S.time) or 0
+    query({ R(7001, 300, 4), R(7001, 200, 3), R(7002, 50, 1) })   -- one search: 7001 at two item levels
+    fire("AUCTION_HOUSE_CLOSED")
+    local h = own(7001)
+    ok("history: a search is recorded once it ends, with its lowest price and total listed", #h == 1 and h[1].d == day and h[1].p == 200 and h[1].l == 200 and h[1].a == 7, h[1] and (h[1].p .. " " .. h[1].a))
+    local HH = (AHProfitDB.hist or {})["TestRealm|Alliance"]
+    ok("history: a lone price has no separate low", HH and HH[7001] and HH[7001].l[day] == nil)
+    fire("AUCTION_HOUSE_SHOW"); timers = {}
+    query({ R(7001, 250, 2) }); query({ R(7001, 260, 9) }); query({ R(7001, 180, 1) }); fire("AUCTION_HOUSE_CLOSED")
+    h = own(7001)
+    local e = (AHProfitDB.hist or {})["TestRealm|Alliance"]; e = e and e[7001]
+    ok("history: same day keeps the highest low, the lowest low and the most listed", #h == 1 and h[1].p == 260 and h[1].l == 180 and h[1].a == 9 and e and e.l[day] == 180, h[1] and (h[1].p .. "/" .. h[1].l .. "/" .. h[1].a))
+    S.time = S.time + 86400
+    fire("AUCTION_HOUSE_SHOW"); timers = {}; query({ R(7001, 100, 2) }); fire("AUCTION_HOUSE_CLOSED")
+    h = own(7001)
+    ok("history: a new day starts a new entry", #h == 2 and h[2].d == day + 1 and h[2].p == 100 and h[1].p == 260)
+    -- a full scan records too, before it forgets unlisted items
+    fire("AUCTION_HOUSE_SHOW"); timers = {}
+    S.pages = { {} }; for i = 1, 700 do S.pages[1][i] = R(7100 + i, 1000 + i, 1) end
+    SlashCmdList.AHPROFIT("scan"); fire("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
+    ok("history: a full scan records every item", #own(7101) == 1 and own(7350)[1].p == 1250 and AHProfitDB.live["TestRealm|Alliance"].full == S.time)
+    ok("history: items missing from the full scan keep their history", #own(7001) == 2 and AHProfitDB.live["TestRealm|Alliance"].p[7001] == nil)
+    fire("AUCTION_HOUSE_CLOSED")
+    -- 21 days kept: older days drop out when the item is written again
+    S.time = S.time + 20 * 86400
+    fire("AUCTION_HOUSE_SHOW"); timers = {}; query({ R(7001, 90, 1) }); fire("AUCTION_HOUSE_CLOSED")
+    h = own(7001)
+    ok("history: days older than 21 are pruned", #h == 2 and h[1].d == day + 1 and h[2].d == day + 21, #h)
+    -- item cap
+    local cap = ns.HIST_ITEMS
+    local H = (AHProfitDB.hist or {})["TestRealm|Alliance"]
+    local n0 = 0; for _ in pairs(H or {}) do n0 = n0 + 1 end
+    ns.HIST_ITEMS = n0 + 1
+    fire("AUCTION_HOUSE_SHOW"); timers = {}; query({ R(9601, 5, 1), R(9602, 5, 1), R(7001, 80, 1) }); fire("AUCTION_HOUSE_CLOSED")
+    local n1 = 0; for _ in pairs(H or {}) do n1 = n1 + 1 end
+    ok("history: item cap stops new items, known items still update", cap == 10000 and n1 == n0 + 1 and own(7001)[2] and own(7001)[2].l == 80, n1 - n0)
+    ns.HIST_ITEMS = cap
+    -- guild-received prices never enter the history (only browse results do)
+    AHProfitDB.live["TestRealm|Alliance"].p[7999] = 5
+    fire("AUCTION_HOUSE_SHOW"); timers = {}; fire("AUCTION_HOUSE_CLOSED")
+    ok("history: prices not from your own browsing are not recorded", #own(7999) == 0)
+end
+-- ---- saved history checked at load
+do
+    local function boot(saved)
+        AHProfitDB = saved
+        local n3 = {}
+        ns = n3
+        load("Data.lua"); load("Core.lua"); fire("ADDON_LOADED", "AHProfit")
+        return AHProfitDB, n3
+    end
+    local today = math.floor((S.time - 1577836800) / 86400)
+    local db1 = boot({ v = 1, shared = { ["TestRealm|Alliance"] = { p = { [5] = 9 }, q = { [5] = 1 }, t = { [5] = S.time }, full = 0, from = {} } } })
+    ok("load: a version 1 save gets a history table and keeps its guild prices", db1.v == 2 and type(db1.hist) == "table" and db1.shared and db1.shared["TestRealm|Alliance"].p[5] == 9)
+    local db2 = boot({ v = 2, hist = { ["TestRealm|Alliance"] = {
+        [10] = { h = { [today] = 100, [today - 1] = 90, [today - 30] = 5, [today + 3] = 7, x = 1 }, l = { [today] = 120, [today - 1] = 80 }, a = { [today] = 2.5, [today - 1] = 4 } },
+        [11] = { h = { [today - 40] = 1 } }, [12] = "bad", ["13"] = { h = {} } }, [7] = 1 } })
+    local e = (db2.hist or {})["TestRealm|Alliance"]
+    ok("load: bad days, prices and lows are dropped, good ones kept", e and e[10] and e[10].h[today] == 100 and e[10].h[today - 1] == 90 and e[10].h[today - 30] == nil and e[10].h[today + 3] == nil and e[10].l[today] == nil and e[10].l[today - 1] == 80 and e[10].a[today] == nil and e[10].a[today - 1] == 4)
+    ok("load: items with nothing left, wrong types and bad houses are dropped", e and e[11] == nil and e[12] == nil and e["13"] == nil and (db2.hist or {})[7] == nil)
+    local many = { v = 2, hist = {} }
+    for i = 1, 10 do many.hist["R" .. i .. "|Alliance"] = { [1] = { h = { [today - 10 + i] = 5 } } } end
+    local db3 = boot(many)
+    local nh = 0; for _ in pairs(db3.hist or {}) do nh = nh + 1 end
+    ok("load: at most 8 houses, the most recently scanned kept", nh == 8 and db3.hist["R10|Alliance"] and db3.hist["R1|Alliance"] == nil, nh)
+    local db4 = boot({ v = 3, hist = { x = 1 } })
+    ok("load: a save from a newer version is left alone", db4.v == 3 and db4.hist and db4.hist.x == 1)
+end
 print(("%d passed, %d failed"):format(pass, fail)); os.exit(fail == 0 and 0 or 1)
