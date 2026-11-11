@@ -43,6 +43,47 @@ local function live()
 end
 ns.live = live
 
+-- Prices received from guild members (Sync.lua) live in their own layer, one per auction house: they never change
+-- or delete your own scans. DB.v 1 introduced it; from = { [scan time] = sender name }. A save written by a newer
+-- version (DB.v > 1) is left untouched and this version then ignores the shared layer.
+local SHARED_V, MAX_HOUSES = 1, 8
+local spare = { p = {}, q = {}, t = {}, full = 0, from = {} }
+local function shared()
+    if DB.v ~= SHARED_V then return spare end
+    local k = houseKey()
+    local H = DB.shared[k]
+    if not H then H = { p = {}, q = {}, t = {}, full = 0, from = {} }; DB.shared[k] = H end
+    return H
+end
+ns.shared = shared
+local function okNum(v, max) return type(v) == "number" and v >= 0 and v <= max and v == math.floor(v) end
+-- Checks the saved shared layer at load: wrong types are dropped, at most MAX_HOUSES houses (the newest kept).
+local function loadShared()
+    if type(DB.v) == "number" and DB.v > SHARED_V then return end
+    if DB.v ~= SHARED_V or type(DB.shared) ~= "table" then DB.shared = {} end
+    DB.v = SHARED_V
+    local keys = {}
+    for k, H in pairs(DB.shared) do
+        if type(k) ~= "string" or type(H) ~= "table" then DB.shared[k] = nil
+        else
+            for _, f in ipairs({ "p", "q", "t", "from" }) do if type(H[f]) ~= "table" then H[f] = {} end end
+            if not okNum(H.full, 1e10) then H.full = 0 end
+            for id, p in pairs(H.p) do
+                if not (okNum(id, 1e7) and okNum(p, 1e12) and p > 0 and okNum(H.t[id], 1e10)) then H.p[id], H.q[id], H.t[id] = nil, nil, nil
+                elseif not okNum(H.q[id], 1e9) then H.q[id] = 0 end
+            end
+            for id in pairs(H.t) do if H.p[id] == nil then H.t[id], H.q[id] = nil, nil end end
+            for id in pairs(H.q) do if H.p[id] == nil then H.q[id] = nil end end
+            for t, n in pairs(H.from) do if not (okNum(t, 1e10) and type(n) == "string" and #n <= 64) then H.from[t] = nil end end
+            keys[#keys + 1] = k
+        end
+    end
+    if #keys > MAX_HOUSES then
+        table.sort(keys, function(a, b) return DB.shared[a].full > DB.shared[b].full end)
+        for i = MAX_HOUSES + 1, #keys do DB.shared[keys[i]] = nil end
+    end
+end
+
 local seedIdx
 local function seedLookup(id)
     local S = ns.seed
@@ -57,16 +98,30 @@ local function seedLookup(id)
     if i then return S.flat[i + 1], S.flat[i + 2], S.t end
 end
 
--- Returns price per unit (copper), quantity listed, time seen, source ("scan" or "feed").
+-- Returns price per unit (copper), quantity listed, time seen, source ("scan", "guild" or "feed") and, for "guild",
+-- the sender's name. Order: your own scan when it is at most 2 hours old, then a guild member's scan newer than
+-- yours, then your older scan, then the bundled feed. A scan older than the feed loses to the feed.
+local OWN_FRESH = 7200
 local function lookup(id)
-    local L = live()
+    local L, H = live(), shared()
     local lp, lt = L.p[id], L.t[id]
+    local gp, gt = H.p[id], H.t[id]
     local sp, sq, st = seedLookup(id)
-    if sp and L.full >= st then sp = nil end      -- a complete scan newer than the snapshot is the whole truth
-    if lp and (not sp or lt >= st) then return lp, L.q[id], lt, "scan" end
+    if sp and math.max(L.full, H.full) >= st then sp = nil end   -- a complete scan newer than the snapshot is the whole truth
+    if sp and lp and lt < st then lp = nil end
+    if sp and gp and gt < st then gp = nil end
+    if lp and now() - lt <= OWN_FRESH then return lp, L.q[id], lt, "scan" end
+    if gp and (not lp or gt > lt) then return gp, H.q[id], gt, "guild", H.from[gt] end
+    if lp then return lp, L.q[id], lt, "scan" end
     if sp then return sp, sq, st, "feed" end
 end
 ns.lookup = lookup
+-- How a price's source is shown: "scan 5m ago", "guild (Name, 20m ago)", "feed 1h ago".
+local function srcLabel(src, t, from)
+    if src == "guild" then return "guild (" .. (type(from) == "string" and from or "a guild member") .. ", " .. age(t) .. ")" end
+    return (src == "scan" and "scan " or "feed ") .. age(t)
+end
+ns.srcLabel = srcLabel
 
 local GREY, WHITE, GREEN, RED = { .6, .6, .6 }, { 1, 1, 1 }, { .25, 1, .25 }, { 1, .3, .3 }
 local function line(tt, l, r, lc, rc)
@@ -81,7 +136,7 @@ local function addLines(tt, id)
     local _, _, quality, _, _, _, _, _, _, _, vendor, _, _, bind = C_Item.GetItemInfo(id)
     if secret(vendor) or secret(bind) or secret(quality) then return end
     if bind == 1 or bind == 4 then return end                    -- bind on pickup and quest items cannot be auctioned
-    local price, qty, t, src = lookup(id)
+    local price, qty, t, src, from = lookup(id)
     local hasVendor = type(vendor) == "number" and vendor > 0
     if not price then
         if hasVendor and quality and quality >= 1 then
@@ -91,7 +146,7 @@ local function addLines(tt, id)
         return
     end
     if vendor ~= nil then line(tt, "Vendor price", hasVendor and money(vendor) or "none", WHITE, hasVendor and WHITE or GREY) end
-    line(tt, "AH price  |cff999999" .. (src == "scan" and "scan " or "feed ") .. age(t) .. (qty and qty > 0 and (", " .. qty .. " listed") or "") .. "|r", money(price), WHITE, WHITE)
+    line(tt, "AH price  |cff999999" .. srcLabel(src, t, from) .. (qty and qty > 0 and (", " .. qty .. " listed") or "") .. "|r", money(price), WHITE, WHITE)
     if vendor == nil then return end                             -- item not cached yet; the next hover has it
     local net = math.floor(price * (100 - DB.cut) / 100)
     local d = net - (hasVendor and vendor or 0)
@@ -221,6 +276,7 @@ f:SetScript("OnEvent", function(_, ev, a1)
         if DB.sync == nil then DB.sync = true end
         if DB.cut ~= 5 and DB.cut ~= 15 then DB.cut = 5 end
         DB.live = DB.live or {}
+        loadShared()
         if ns.tools then
             for _, e in ipairs(ns.tools.events) do f:RegisterEvent(e) end
             ns.tools.init()
@@ -236,7 +292,7 @@ f:SetScript("OnEvent", function(_, ev, a1)
         end
     elseif ev == "AUCTION_HOUSE_SHOW" then
         open = true
-        if DB.autoscan and C_AuctionHouse and C_AuctionHouse.SendBrowseQuery and now() - live().full > 900 then C_Timer.After(1, function() if open and not scanning then startScan(true) end end) end
+        if DB.autoscan and C_AuctionHouse and C_AuctionHouse.SendBrowseQuery and now() - math.max(live().full, shared().full) > 900 then C_Timer.After(1, function() if open and not scanning then startScan(true) end end) end
     elseif ev == "AUCTION_HOUSE_CLOSED" then
         open, scanning, waitingThrottle, pendingStart = false, false, false, false
     elseif ev == "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED" then

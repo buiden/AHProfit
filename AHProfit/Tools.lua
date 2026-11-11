@@ -109,10 +109,10 @@ function T.advise(list, cutPct)
             tot.pending = tot.pending + 1
         else
             local free = it.n - it.bound
-            local price, qty, t, src = ns.lookup(it.id)
+            local price, qty, t, src, from = ns.lookup(it.id)
             local net = price and math.floor(price * (100 - cutPct) / 100) or 0
             local r = { id = it.id, name = name, n = it.n, free = free, bound = it.bound, vendor = vendor, price = price, net = net,
-                qty = qty, t = t, src = src, gear = classID == 2 or classID == 4, quest = bind == 4 or classID == 12 }
+                qty = qty, t = t, src = src, from = from, gear = classID == 2 or classID == 4, quest = bind == 4 or classID == 12 }
             if price and free > 0 and bind ~= 1 and bind ~= 4 and net > vendor then
                 r.verdict, r.value, r.gain = "ah", net * free + vendor * it.bound, (net - vendor) * free
                 tot.ah, tot.vendor = tot.ah + net * free, tot.vendor + vendor * it.bound

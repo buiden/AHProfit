@@ -13,7 +13,7 @@ The profit line is green with a `+` when the auction house pays more than the ve
 ## Where prices come from
 
 - **Your own scan.** The addon scans the auction house when you open it (at most every 15 minutes), or when you type `/ahp scan`. The scan stands still while you are on a Sell tab or hold an item, so it does not get in the way of posting.
-- **Your guild.** When a guild member with the addon finishes a full scan, the prices reach everyone else in the guild who runs it, with no reload.
+- **Your guild.** When a guild member with the addon finishes a full scan, the prices reach everyone else in the guild who runs it, with no reload. They are kept apart from your own scans and never change or delete them; the tooltip says `guild (Name, 20m ago)`. Your own scan wins while it is under 2 hours old.
 - **The bundled snapshot.** `Data.lua` holds one snapshot of Blizzard's auction feed for the **EU PvP Alliance** house, taken when the release was built. It is used only for Alliance characters and only until a newer scan exists. On any other realm group it is wrong: scan once and it is replaced.
 
 Each tooltip says which source the price is from and how old it is.
@@ -48,7 +48,7 @@ The addon never buys, sells, lists or moves anything.
 
 ## Limits
 
-- Guild-shared prices are taken as sent: the addon cannot tell a real scan from made-up numbers.
+- Guild-shared prices are taken as sent: the addon cannot tell a real scan from made-up numbers. Scans timed more than 5 minutes ahead of your clock or more than 12 hours old are refused, and only your own scans are ever passed on.
 - The farm window's drop data and the price history are a snapshot from the release, for Alliance. Its auction prices are the snapshot's too, except for items you have scanned since: those use your newer price.
 - Tested against a mock game client only (see below).
 

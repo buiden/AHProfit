@@ -1,5 +1,8 @@
 -- AH Profit guild sync: when one player finishes a full auction house scan, the prices go to every guild member
 -- running the addon over the hidden addon channel, so nobody else needs to scan or reload.
+-- Received prices go into a separate shared layer (ns.shared, see Core.lua): they never change or delete your own
+-- scans, and only your own full scan is ever sent on. A scan time more than 5 minutes ahead or more than 12 hours
+-- behind your clock is refused, so a wrong clock cannot replace good prices or block later ones.
 -- Messages (each at most 255 bytes, plain text):
 --   H<ver>,<session>,<scan time>,<items>,<chunks>     start of a scan
 --   D<session>,<chunk number>,<payload>               items: id step, price, quantity as base-32 digits
@@ -10,6 +13,9 @@ local _, ns = ...
 local Y = {}
 ns.sync = Y
 local PFX, VER, MAXLEN, GAP = "AHProfit", 1, 238, 1.05
+local AHEAD, BEHIND = 300, 43200           -- accepted scan times: up to 5 min in the future, up to 12 h old
+Y.MAXITEMS = 60000                         -- hard cap on items kept in one house's shared layer
+local held = setmetatable({}, { __mode = "k" })   -- shared layer -> item count, recounted for every accepted scan
 local A = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+/"
 local DEC = {}
 for i = 1, 64 do DEC[A:byte(i)] = i - 1 end
@@ -131,8 +137,8 @@ function Y.broadcast(quiet)
 end
 function Y.ask()
     if not on() or not inGuild() then return end
-    local L = ns.live()
-    send("Q" .. VER .. "," .. math.floor(math.max(L.full, ns.seed and ns.seed.t or 0)))
+    local L, H = ns.live(), ns.shared()
+    send("Q" .. VER .. "," .. math.floor(math.max(L.full, H.full, ns.seed and ns.seed.t or 0)))
 end
 
 -- Gathering nodes go out one at a time, behind any price broadcast.
@@ -199,11 +205,14 @@ end
 local function header(sender, ver, sid, t, n, chunks)
     if ver ~= VER then return end
     local now = ns.now()
-    if not (whole(t, now + 120) and t > now - 86400 and whole(n, 50000) and n > 0 and whole(chunks, 2000) and chunks > 0 and chunks <= n) then return end
-    local L = ns.live()
+    if not (whole(t, now + AHEAD) and t >= now - BEHIND and whole(n, 50000) and n > 0 and whole(chunks, 2000) and chunks > 0 and chunks <= n) then return end
+    local L, H = ns.live(), ns.shared()
     if pending and t >= L.full then pending = nil end           -- someone else is already answering the request
     for k, r in pairs(R) do if now - r.at > 900 then R[k] = nil end end
-    if t <= L.full then return end                               -- nothing newer than what is here
+    if t <= math.max(L.full, H.full) then return end            -- nothing newer than what is here
+    local c = 0
+    for _ in pairs(H.p) do c = c + 1 end
+    held[H] = c
     R[sender] = { sid = sid, t = t, n = n, chunks = chunks, got = {}, count = 0, items = 0, seen = {}, at = now }
 end
 local function chunk(sender, sid, seq, payload)
@@ -212,21 +221,32 @@ local function chunk(sender, sid, seq, payload)
     local list = Y.decode(payload)
     if not list or r.items + #list / 3 > r.n then R[sender] = nil; return end
     r.got[seq] = true; r.count = r.count + 1
-    local L, t, seen = ns.live(), r.t, r.seen
+    local H, t, seen = ns.shared(), r.t, r.seen
+    local n = held[H] or 0
+    local name = sender:match("^[^-]+")
+    H.from[t] = name
     for i = 1, #list, 3 do
         local id = list[i]
         if not seen[id] then seen[id] = true; r.items = r.items + 1 end
-        if (L.t[id] or 0) < t then L.p[id], L.q[id], L.t[id] = list[i + 1], list[i + 2], t end
+        if H.p[id] == nil and n >= Y.MAXITEMS then r.capped = true
+        elseif (H.t[id] or 0) < t then
+            if H.p[id] == nil then n = n + 1 end
+            H.p[id], H.q[id], H.t[id] = list[i + 1], list[i + 2], t
+        end
     end
+    held[H] = n
     if r.count < r.chunks then return end
     R[sender] = nil
-    if r.items ~= r.n then return end                            -- incomplete: keep what arrived, forget nothing
-    for id, it in pairs(L.t) do
-        if it < t and not seen[id] then L.p[id], L.q[id], L.t[id] = nil, nil, nil end
+    if r.items ~= r.n or r.capped then return end                -- incomplete: keep what arrived, forget nothing
+    for id, it in pairs(H.t) do                                  -- shared layer only; your own scans are never touched
+        if it < t and not seen[id] then H.p[id], H.q[id], H.t[id] = nil, nil, nil; held[H] = held[H] - 1 end
     end
-    if t > L.full then L.full = t end
+    if t > H.full then H.full = t end
+    local used = {}
+    for _, it in pairs(H.t) do used[it] = true end
+    for k in pairs(H.from) do if not used[k] then H.from[k] = nil end end
     local DB = ns.db()
-    DB.syncFrom, DB.syncAt = sender:match("^[^-]+"), t
+    DB.syncFrom, DB.syncAt = name, t
     ns.say("prices updated from " .. DB.syncFrom .. "'s scan (" .. ns.age(t) .. "), " .. r.n .. " items.")
 end
 local function request(have)
@@ -235,7 +255,10 @@ local function request(have)
     if L.full <= have or ns.now() - L.full > 43200 then return end
     local tok = {}
     pending = tok
-    C_Timer.After(2 + math.random() * 8, function() if pending == tok and not out then Y.broadcast(true) end end)
+    -- Only your own scan is sent. When a guild member's newer scan is known here, its owner gets the first chance
+    -- to answer (seeing their reply cancels this one).
+    local wait = ns.shared().full > L.full and 12 or 2
+    C_Timer.After(wait + math.random() * 8, function() if pending == tok and not out then Y.broadcast(true) end end)
 end
 function Y.receive(prefix, text, channel, sender)
     if secret(prefix) or secret(text) or secret(channel) or secret(sender) then return end
