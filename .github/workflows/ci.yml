@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  required:
+    name: Required CI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Lua 5.1
+        run: sudo apt-get update -q && sudo -S -p '' apt-get install -y -q lua5.1
+      - name: Syntax check
+        run: for f in AHProfit/*.lua test/*.lua; do luac5.1 -p "$f"; done
+      - name: Tests
+        run: |
+          for t in test/harness.lua test/extra_test.lua test/sync_test.lua test/ui_test.lua; do
+            echo "== $t"
+            lua5.1 "$t"
+          done
