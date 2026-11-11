@@ -18,6 +18,8 @@ The profit line is green with a `+` when the auction house pays more than the ve
 
 Each tooltip says which source the price is from and how old it is.
 
+Treat guild-shared and bundled prices as estimates: only your own recent scan reflects your auction house right now.
+
 ## Other features
 
 | Command | What it does |
