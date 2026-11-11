@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- Farm window: items you have scanned since the bundled farm data use your newer auction price (gathering, mobs, fishing and crafting). Without a newer scan the numbers are unchanged.
+
 ## 0.5.3
 - Tooltip is three lines: vendor price, AH price, AH profit after the cut (green `+` / red `-`). Extra lines with Shift.
 - The automatic scan stands still while you sell, so posting is not refused with "You're doing this too fast".

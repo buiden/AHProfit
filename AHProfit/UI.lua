@@ -790,7 +790,7 @@ function UI:Refresh()
     local C = (AHProfitDB and AHProfitDB.cut) or 5
     if farmTab then
         local t = F.time()
-        self.status:SetText("Auction prices from " .. date("%a %H:%M", t) .. " (" .. ns.age(t) .. "), " .. C .. "% cut taken off. Asking prices, not completed sales.")
+        self.status:SetText("Auction prices from " .. date("%a %H:%M", t) .. " (" .. ns.age(t) .. "), or your own newer scan, " .. C .. "% cut taken off. Asking prices, not completed sales.")
     elseif S.tab == "hist" then
         local t = Tl.histTime()
         self.status:SetText(t and ("Price history up to " .. date("%a %H:%M", t) .. " (" .. ns.age(t) .. "). One point per day, from the hourly price feed.") or "Price history is missing. Run the updater, then /reload.")

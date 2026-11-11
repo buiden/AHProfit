@@ -1,5 +1,5 @@
 -- AH Profit farm planner: the same calculations as the gold-farming page, over FarmData.lua.
--- Pure arithmetic, no game calls. S is the player's setup: lvMin, lvMax, mining, herbalism, blacksmithing, skinning,
+-- Pure arithmetic over the data; the only outside call is ns.lookup for your own prices. S is the player's setup: lvMin, lvMax, mining, herbalism, blacksmithing, skinning,
 -- mSkill, hSkill, bSkill. CUT is the share kept after the auction cut (0.95 for a 5% cut).
 local _, ns = ...
 local F = {}
@@ -27,18 +27,34 @@ function F.defaults(level)
     return { lvMin = lo, lvMax = hi, mining = true, herbalism = false, mSkill = 225, hSkill = 1, blacksmithing = true, bSkill = 200, skinning = false }
 end
 
+-- Auction price and listed count of an item: the addon's own price (your scan, or anything else ns.lookup knows)
+-- when it is newer than the farm data, otherwise the farm data's own columns. The bundled feed is the same snapshot
+-- as the farm data, so on its own it changes nothing and the numbers stay the gold-farming page's. The third value
+-- is true when the item has a usable auction price (the farm data's price list flag, or a newer price of yours).
+local function price(i)
+    local it = ITEMS[i]
+    local lookup = ns.lookup
+    if lookup then
+        local ok, p, q, t = pcall(lookup, it[2])
+        if ok and type(p) == "number" and p > 0 and type(t) == "number" and t > T then
+            return p, type(q) == "number" and q or 0, true
+        end
+    end
+    return it[3], it[4], it[6] == 1
+end
+F.price = price
+
 -- What one unit pays you: the auction price after the cut, or the vendor price when the vendor pays more.
 local function best(i, CUT)
-    local it = ITEMS[i]
-    local a, b = it[3] * CUT, it[5]
+    local a, b = price(i) * CUT, ITEMS[i][5]
     return a > b and a or b
 end
 F.best = best
 local function nodeValue(d, CUT)
     local v, loot = 0, d[6]
     for k = 1, #loot, 2 do
-        local it = ITEMS[loot[k]]
-        if it[6] == 1 and it[3] > 0 then v = v + loot[k + 1] * it[3] * CUT end
+        local p, _, listed = price(loot[k])
+        if listed and p > 0 then v = v + loot[k + 1] * p * CUT end
     end
     return v
 end
@@ -160,9 +176,10 @@ function F.drops(list, CUT)
     local out = {}
     for k = 1, #list, 2 do
         local it, q, each = ITEMS[list[k]], list[k + 1], best(list[k], CUT)
+        local p, n = price(list[k])
         if q * each > 0 then
             out[#out + 1] = { i = #out + 1, name = it[1], id = it[2], q = q, each = each, v = q * each,
-                vendor = it[5] > 0 and it[5] >= it[3] * CUT, listed = it[4], thin = it[3] > 0 and it[4] < 150 and it[3] * CUT > it[5] }
+                vendor = it[5] > 0 and it[5] >= p * CUT, listed = n, thin = p > 0 and n < 150 and p * CUT > it[5] }
         end
     end
     table.sort(out, function(x, y) if x.v ~= y.v then return x.v > y.v end return x.i < y.i end)
@@ -198,18 +215,19 @@ function F.crafts(S, CUT)
         local c = CRAFTS[ci]
         local o = ITEMS[c[1]]
         local on = (c[3] == 1 and S.mining) or (c[3] == 3 and S.blacksmithing)
-        if on and o[6] == 1 and o[3] > 0 then
+        local op, on2, olisted = price(c[1])
+        if on and olisted and op > 0 then
             local buy, raw, miss, mats = 0, 0, false, c[7]
             for k = 1, #mats, 2 do
-                local m = ITEMS[mats[k]]
-                if m[6] ~= 1 or m[3] <= 0 then miss = true; break end
-                buy = buy + mats[k + 1] * m[3]
-                raw = raw + mats[k + 1] * m[3] * CUT
+                local mp, _, ml = price(mats[k])
+                if not ml or mp <= 0 then miss = true; break end
+                buy = buy + mats[k + 1] * mp
+                raw = raw + mats[k + 1] * mp * CUT
             end
             if not miss then
-                local vc, net = c[5], o[3] * c[2] * CUT
+                local vc, net = c[5], op * c[2] * CUT
                 local sk = c[3] == 1 and S.mSkill or S.bSkill
-                local row = { i = ci, c = c, name = o[1], id = o[2], makes = c[2], listed = o[4], skill = c[4], smelting = c[3] == 1,
+                local row = { i = ci, c = c, name = o[1], id = o[2], makes = c[2], listed = on2, skill = c[4], smelting = c[3] == 1,
                     net = net, buy = buy + vc, profit = net - buy - vc, own = net - raw - vc, ok = sk >= c[4] }
                 if row.own > 0 or row.profit > 0 then rows[#rows + 1] = row end
             end
