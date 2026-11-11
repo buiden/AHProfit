@@ -31,8 +31,10 @@ Each tooltip says which source the price is from and how old it is.
 | `/ahp session` | Measured coin and items for a farming session |
 | `/ahp scan`, `/ahp scan stop` | Start or end a scan |
 | `/ahp auto on` / `off` | Scan by itself when the auction house opens |
-| `/ahp share on` / `off` | Guild price sharing |
-| `/ahp cut 5` | The auction house cut in percent |
+| `/ahp sync on` / `off` | Guild sharing |
+| `/ahp share` | Send your scanned prices to the guild now |
+| `/ahp on` / `off` | Tooltip lines |
+| `/ahp cut 5`, `/ahp cut 15` | The auction house cut in percent |
 
 The addon never buys, sells, lists or moves anything.
 
