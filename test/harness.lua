@@ -162,12 +162,14 @@ do
     local h = own(7001)
     ok("history: a search is recorded once it ends, with its lowest price and total listed", #h == 1 and h[1].d == day and h[1].p == 200 and h[1].l == 200 and h[1].a == 7, h[1] and (h[1].p .. " " .. h[1].a))
     local HH = (AHProfitDB.hist or {})["TestRealm|Alliance"]
-    ok("history: a lone price has no separate low", HH and HH[7001] and HH[7001].l[day] == nil)
+    local d7001 = HH and HH[7001] and ns.histDecode(HH[7001], day)
+    ok("history: saved as one string per item", type(HH and HH[7001]) == "string", type(HH and HH[7001]))
+    ok("history: a lone price has no separate low", d7001 and #d7001 == 1 and d7001[1][3] == 0)
     fire("AUCTION_HOUSE_SHOW"); timers = {}
     query({ R(7001, 250, 2) }); query({ R(7001, 260, 9) }); query({ R(7001, 180, 1) }); fire("AUCTION_HOUSE_CLOSED")
     h = own(7001)
-    local e = (AHProfitDB.hist or {})["TestRealm|Alliance"]; e = e and e[7001]
-    ok("history: same day keeps the highest low, the lowest low and the most listed", #h == 1 and h[1].p == 260 and h[1].l == 180 and h[1].a == 9 and e and e.l[day] == 180, h[1] and (h[1].p .. "/" .. h[1].l .. "/" .. h[1].a))
+    local e = (AHProfitDB.hist or {})["TestRealm|Alliance"]; e = e and e[7001] and ns.histDecode(e[7001], day)
+    ok("history: same day keeps the highest low, the lowest low and the most listed", #h == 1 and h[1].p == 260 and h[1].l == 180 and h[1].a == 9 and e and e[1][3] == 180, h[1] and (h[1].p .. "/" .. h[1].l .. "/" .. h[1].a))
     S.time = S.time + 86400
     fire("AUCTION_HOUSE_SHOW"); timers = {}; query({ R(7001, 100, 2) }); fire("AUCTION_HOUSE_CLOSED")
     h = own(7001)
@@ -176,9 +178,36 @@ do
     fire("AUCTION_HOUSE_SHOW"); timers = {}
     S.pages = { {} }; for i = 1, 700 do S.pages[1][i] = R(7100 + i, 1000 + i, 1) end
     SlashCmdList.AHPROFIT("scan"); fire("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
-    ok("history: a full scan records every item", #own(7101) == 1 and own(7350)[1].p == 1250 and AHProfitDB.live["TestRealm|Alliance"].full == S.time)
+    local function recorded() local n = 0; for i = 7101, 7800 do if #own(i) == 1 then n = n + 1 end end return n end
+    ok("history: a big scan is written over several frames, 400 items per frame", recorded() == 400 and #timers == 1, recorded())
+    local frames = 0
+    while #timers > 0 and frames < 10 do runTimers(); frames = frames + 1 end
+    ok("history: a full scan records every item", recorded() == 700 and frames == 1 and own(7350)[1].p == 1250 and AHProfitDB.live["TestRealm|Alliance"].full == S.time, recorded() .. " in " .. frames)
+    -- logout or /reload in the middle: everything still waiting is written before the game saves
+    S.time = S.time + 1
+    for i = 1, 700 do S.pages[1][i] = R(7100 + i, 2000 + i, 1) end
+    SlashCmdList.AHPROFIT("scan"); fire("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
+    timers = {}                                                  -- the next frame never comes
+    fire("PLAYER_LOGOUT")
+    ok("history: logout writes everything still waiting", own(7800)[1] and own(7800)[1].p == 2700 and own(7101)[1].p == 2001, tostring(own(7800)[1] and own(7800)[1].p) .. " " .. tostring(own(7101)[1] and own(7101)[1].p) .. " n=" .. #own(7101))
     ok("history: items missing from the full scan keep their history", #own(7001) == 2 and AHProfitDB.live["TestRealm|Alliance"].p[7001] == nil)
     fire("AUCTION_HOUSE_CLOSED")
+    -- encoding: round trip, and a corrupt string is dropped and started over on the next write
+    do
+        local enc, dec = ns.histEncode, ns.histDecode
+        local list = { { 2490, 1, 0, 0 }, { 2491, 31, 30, 32 }, { 2495, 1e12, 999999999999, 1e9 }, { 2506, 33, 0, 7 } }
+        local back = dec(enc(list), 2506)
+        local same = back and #back == #list
+        for i = 1, #list do for k = 1, 4 do if not (same and back[i][k] == list[i][k]) then same = false end end end
+        ok("history: encoding round trip, including 0, 31/32 digit edges and the 1e12 price cap", same and #enc(list) < 60, enc(list))
+        local Hh = AHProfitDB.hist["TestRealm|Alliance"]
+        Hh[7001] = "ZZ!"
+        ok("history: a corrupt string reads as no history", #own(7001) == 0)
+        fire("AUCTION_HOUSE_SHOW"); timers = {}; query({ R(7001, 120, 3) }); fire("AUCTION_HOUSE_CLOSED")
+        h = own(7001)
+        ok("history: ...and the next write starts it over", #h == 1 and h[1].p == 120 and h[1].a == 3 and h[1].d == day + 1, #h)
+        Hh[7001] = enc({ { day, 260, 180, 9 }, { day + 1, 100, 0, 2 } })     -- back to what the checks below expect
+    end
     -- 21 days kept: older days drop out when the item is written again
     S.time = S.time + 20 * 86400
     fire("AUCTION_HOUSE_SHOW"); timers = {}; query({ R(7001, 90, 1) }); fire("AUCTION_HOUSE_CLOSED")
@@ -210,14 +239,22 @@ do
     local today = math.floor((S.time - 1577836800) / 86400)
     local db1 = boot({ v = 1, shared = { ["TestRealm|Alliance"] = { p = { [5] = 9 }, q = { [5] = 1 }, t = { [5] = S.time }, full = 0, from = {} } } })
     ok("load: a version 1 save gets a history table and keeps its guild prices", db1.v == 2 and type(db1.hist) == "table" and db1.shared and db1.shared["TestRealm|Alliance"].p[5] == 9)
+    -- a separate encoder, so these strings do not come from the code under test
+    local A = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+/"
+    local function digits(v) local o = {}; while v >= 32 do local d = v % 32; o[#o + 1] = A:sub(d + 33, d + 33); v = (v - d) / 32 end o[#o + 1] = A:sub(v + 1, v + 1); return table.concat(o) end
+    local function enc(list) local o, prev = {}, 0; for _, e in ipairs(list) do o[#o + 1] = digits(e[1] - prev) .. digits(e[2]) .. digits(e[3]) .. digits(e[4]); prev = e[1] end return table.concat(o) end
     local db2 = boot({ v = 2, hist = { ["TestRealm|Alliance"] = {
-        [10] = { h = { [today] = 100, [today - 1] = 90, [today - 30] = 5, [today + 3] = 7, x = 1 }, l = { [today] = 120, [today - 1] = 80 }, a = { [today] = 2.5, [today - 1] = 4 } },
-        [11] = { h = { [today - 40] = 1 } }, [12] = "bad", ["13"] = { h = {} } }, [7] = 1 } })
+        [10] = enc({ { today - 30, 5, 0, 1 }, { today - 1, 90, 80, 4 }, { today, 100, 0, 2 } }),
+        [11] = enc({ { today - 40, 1, 0, 1 } }), [12] = "bad", [14] = enc({ { today + 3, 7, 0, 1 } }), [15] = enc({ { today, 50, 60, 1 } }),
+        [16] = string.rep("1", 2000), [17] = { h = {} }, ["13"] = enc({ { today, 1, 0, 1 } }) }, [7] = {} } })
     local e = (db2.hist or {})["TestRealm|Alliance"]
-    ok("load: bad days, prices and lows are dropped, good ones kept", e and e[10] and e[10].h[today] == 100 and e[10].h[today - 1] == 90 and e[10].h[today - 30] == nil and e[10].h[today + 3] == nil and e[10].l[today] == nil and e[10].l[today - 1] == 80 and e[10].a[today] == nil and e[10].a[today - 1] == 4)
-    ok("load: items with nothing left, wrong types and bad houses are dropped", e and e[11] == nil and e[12] == nil and e["13"] == nil and (db2.hist or {})[7] == nil)
+    local h10 = ns.histOwn(10)
+    ok("load: a stored string decodes, days older than 21 are dropped", #h10 == 2 and h10[1].d == today - 1 and h10[1].p == 90 and h10[1].l == 80 and h10[1].a == 4 and h10[2].p == 100 and h10[2].l == 100, #h10)
+    ok("load: wrong types, string keys and over-long strings are dropped at load", e and e[16] == nil and e[17] == nil and e["13"] == nil and (db2.hist or {})[7] == nil)
+    ok("load: strings are not decoded at load (checked when read)", e and e[12] == "bad" and e[14] ~= nil)
+    ok("load: corrupt, future-day and low-above-high strings read as no history", #ns.histOwn(12) == 0 and #ns.histOwn(14) == 0 and #ns.histOwn(15) == 0 and #ns.histOwn(11) == 0)
     local many = { v = 2, hist = {} }
-    for i = 1, 10 do many.hist["R" .. i .. "|Alliance"] = { [1] = { h = { [today - 10 + i] = 5 } } } end
+    for i = 1, 10 do many.hist["R" .. i .. "|Alliance"] = { [1] = enc({ { today - 10 + i, 5, 0, 1 } }) } end
     local db3 = boot(many)
     local nh = 0; for _ in pairs(db3.hist or {}) do nh = nh + 1 end
     ok("load: at most 8 houses, the most recently scanned kept", nh == 8 and db3.hist["R10|Alliance"] and db3.hist["R1|Alliance"] == nil, nh)

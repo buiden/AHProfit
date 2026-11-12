@@ -49,7 +49,7 @@ The addon never buys, sells, lists or moves anything.
 ## Limits
 
 - Guild-shared prices are taken as sent: the addon cannot tell a real scan from made-up numbers. Scans timed more than 5 minutes ahead of your clock or more than 12 hours old are refused, received prices older than 12 hours are dropped at the next received scan or reload, and only your own scans are ever passed on.
-- The farm window's drop data and the price history are a snapshot from the release, for Alliance. Its auction prices are the snapshot's too, except for items where the addon's own price for the item (your scan, a guild member's or the bundled feed, as the tooltip shows it) is newer: those use it. Your own scans also keep a daily history (21 days, up to 10,000 items per auction house) that the deals use first; it makes the saved file larger, several MB for a house you scan in full every day.
+- The farm window's drop data and the price history are a snapshot from the release, for Alliance. Its auction prices are the snapshot's too, except for items where the addon's own price for the item (your scan, a guild member's or the bundled feed, as the tooltip shows it) is newer: those use it. Your own scans also keep a daily history (21 days, up to 10,000 items per auction house) that the deals use first; it is stored compactly (one short string per item), about 1 MB for a house of 6,000 items scanned in full every day.
 - Tested against a mock game client only (see below).
 
 ## Tests

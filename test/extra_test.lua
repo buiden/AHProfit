@@ -168,7 +168,7 @@ do
     -- PR-B: dips from your own daily history (AHProfitDB.hist) first, the bundled file otherwise
     local Hh = a.ns.histHouse and a.ns.histHouse() or {}
     local sd = a.ns.scanDay and a.ns.scanDay(GetServerTime()) or 0
-    local function days(id, list) local e = { h = {}, l = {}, a = {} }; for i, p in ipairs(list) do e.h[sd - #list + i] = p; e.a[sd - #list + i] = 1 end; Hh[id] = e end
+    local function days(id, list) local e = {}; for i, p in ipairs(list) do e[i] = { sd - #list + i, p, 0, 1 } end; Hh[id] = a.ns.histEncode(e) end
     local function dip(id) for _, x in ipairs(as(a).deals()) do if x.kind == "dip" and x.id == id then return x end end end
     ok("bundled history is the source while you have under 5 own days", dip(2770) and dip(2770).usual == 100 and not dip(2770).own)
     days(2770, { 40, 42, 38, 41, 40 })

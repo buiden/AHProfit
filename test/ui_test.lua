@@ -472,7 +472,7 @@ do
         local Hh = n2.histHouse and n2.histHouse()
         if Hh then
             local sd = n2.scanDay(W.time)
-            Hh[900001] = { h = { [sd - 4] = 2000, [sd - 3] = 2000, [sd - 2] = 2000, [sd - 1] = 2000, [sd] = 2000 }, l = {}, a = {} }
+            Hh[900001] = n2.histEncode({ { sd - 4, 2000, 0, 1 }, { sd - 3, 2000, 0, 1 }, { sd - 2, 2000, 0, 1 }, { sd - 1, 2000, 0, 1 }, { sd, 2000, 0, 1 } })
             U.tabs.deals.scripts.OnClick[1]()
             local dipE
             for _, e in ipairs(U.entries) do if e.left == "Test Ore" then dipE = e end end
