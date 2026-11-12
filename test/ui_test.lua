@@ -212,6 +212,65 @@ local before = collectgarbage("count"); local t0 = os.clock()
 for i = 1, 200 do S.tab = ({ "mine", "mobs", "fish", "craft" })[i % 4 + 1]; UI:Refresh() end
 print(string.format("refresh cost: %.2f ms each, %.0f KB garbage each (runs only when you click)", (os.clock() - t0) * 1000 / 200, (collectgarbage("count") - before) / 200))
 
+-- ---- the farm window uses your own (newer) auction prices, not only the bundled farm data
+do
+    for _, k in ipairs(KEYS) do S[k] = REF.scenarios[1][k] end
+    AHProfitDB.cut = 5
+    local CUT, T = 0.95, F.time()
+    local L = ns.live()
+    local function snap()
+        local out = {}
+        for _, z in ipairs(F.zones(S, CUT)) do out[#out + 1] = z.name .. "=" .. z.val end
+        for _, m in ipairs(F.mobs(S, CUT)) do out[#out + 1] = m.name .. "=" .. m.v end
+        for _, c in ipairs(F.crafts(S, CUT)) do out[#out + 1] = c.name .. "=" .. c.own .. "/" .. c.profit end
+        return table.concat(out, ";")
+    end
+    local base = snap()
+    -- the bundled feed is the same snapshot as the farm data: on its own it changes nothing
+    ok("no scan: same ranking and values as the page", base == snap() and next(L.p) == nil)
+    -- the zone ranked last becomes first once your scan prices its main ore very high
+    local zs = F.zones(S, CUT)
+    local last = zs[#zs]
+    local node, ore
+    for _, r in ipairs(last.rows) do if r.ok then node = r; break end end
+    local nd = ns.farmData[3][node.ni]
+    ore = F.item(nd[6][1])
+    L.p[ore[2]], L.q[ore[2]], L.t[ore[2]] = 50000000, 7, T + 60
+    local zs2, rank, v2 = F.zones(S, CUT), nil, nil
+    for i, z in ipairs(zs2) do if z.name == last.name then rank, v2 = i, z.val end end
+    local function order(list) local o = {}; for _, z in ipairs(list) do o[#o + 1] = z.name end return table.concat(o, ",") end
+    ok("a newer own scan changes the zone ranking", #zs > 1 and order(zs2) ~= order(zs) and v2 > last.val * 100, order(zs2) .. " " .. tostring(v2) .. " vs " .. last.val)
+    local d = F.drops({ nd[6][1], 1 }, CUT)
+    ok("drops show the scanned price and its listed count", d[1] and d[1].each == 50000000 * CUT and d[1].listed == 7, d[1] and (d[1].each .. " " .. d[1].listed))
+    ok("best() uses the scanned price", F.best(nd[6][1], CUT) == 50000000 * CUT)
+    S.tab = "mine"; UI:Refresh()
+    ok("the status line says newer scans count", UI.status:GetText():find("or your own newer scan", 1, true), UI.status:GetText())
+    -- a scan older than the farm data does not override it
+    L.t[ore[2]] = T - 60
+    ok("an older scan leaves the ranking alone", snap() == base)
+    -- crafting: a scanned bar price moves the craft's numbers
+    local cr = F.crafts(S, CUT)[1]
+    L.p[cr.id], L.q[cr.id], L.t[cr.id] = 90000000, 3, T + 60
+    local cr2
+    for _, c in ipairs(F.crafts(S, CUT)) do if c.id == cr.id then cr2 = c end end
+    ok("a newer own scan of the crafted item changes its value", cr2 and cr2.net == 90000000 * cr.makes * CUT, cr2 and cr2.net)
+    -- an item the farm data does not list in its price list counts once you have scanned it
+    local unl
+    for i, it in ipairs(ns.farmData[2]) do if it[6] ~= 1 and it[5] == 0 then unl = i; break end end
+    if unl then
+        local it = F.item(unl)
+        L.p[it[2]], L.q[it[2]], L.t[it[2]] = 1234, 2, T + 60
+        ok("a scanned item outside the bundled price list gets a value", F.best(unl, CUT) == 1234 * CUT, F.best(unl, CUT))
+    end
+    -- the ranking returns to the page's once the scans are gone; nothing breaks before the saved data loads
+    for _, k in ipairs({ "p", "q", "t" }) do L[k] = {} end
+    ok("scans cleared: back to the page's values", snap() == base)
+    local saved = ns.lookup
+    ns.lookup = function() error("not ready") end
+    ok("a failing price lookup falls back to the farm data", pcall(snap) and snap() == base)
+    ns.lookup = saved
+end
+
 -- ================================================================ bags, deposits, session and price history ==
 do
     AHProfitDB = nil; AHProfitFarmFrame = nil; SlashCmdList = {}; UISpecialFrames = {}

@@ -49,7 +49,7 @@ The addon never buys, sells, lists or moves anything.
 ## Limits
 
 - Guild-shared prices are taken as sent: the addon cannot tell a real scan from made-up numbers.
-- The farm window's drop data and the price history are a snapshot from the release, for Alliance.
+- The farm window's drop data and the price history are a snapshot from the release, for Alliance. Its auction prices are the snapshot's too, except for items you have scanned since: those use your newer price.
 - Tested against a mock game client only (see below).
 
 ## Tests
