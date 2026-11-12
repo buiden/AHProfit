@@ -375,6 +375,56 @@ do
     ns.HIST_ITEMS = cap
 end
 
+-- ---- a row older than the item's newest day is placed in day order; a string it cannot place is kept
+do
+    local T0 = S.time
+    local function boot(saved) AHProfitDB = saved; ns = {}; load("Data.lua"); load("Core.lua"); fire("ADDON_LOADED", "AHProfit"); AHProfitDB.autoscan = false; timers = {}; return AHProfitDB end
+    boot({})
+    local d = ns.scanDay(S.time)
+    local mid = 1577836800 + (d + 1) * 86400
+    -- a query seen before midnight is written after a newer day was already stored for the item
+    S.time = mid - 5
+    fire("AUCTION_HOUSE_SHOW"); timers = {}
+    S.pages = { { R(610001, 70, 3) } }
+    fire("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")                 -- seen on day d, written at close
+    S.time = mid + 5
+    local H = ns.histHouse()
+    H[610001] = ns.histEncode({ { d - 1, 50, 0, 1 }, { d + 1, 90, 0, 2 } })
+    fire("AUCTION_HOUSE_CLOSED")
+    local h = ns.histOwn(610001)
+    ok("history: an older row is placed in day order, the newer day kept", #h == 3 and h[1].d == d - 1 and h[2].d == d and h[2].p == 70 and h[3].d == d + 1 and h[3].p == 90, #h .. " " .. tostring(h[2] and h[2].d))
+    -- the same day again merges into that day
+    S.time = mid - 1
+    fire("AUCTION_HOUSE_SHOW"); timers = {}
+    S.pages = { { R(610001, 60, 9) } }
+    fire("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
+    S.time = mid + 6
+    fire("AUCTION_HOUSE_CLOSED")
+    h = ns.histOwn(610001)
+    ok("history: ...and a second row for that day merges into it", #h == 3 and h[2].d == d and h[2].p == 70 and h[2].l == 60 and h[2].a == 9, #h)
+    -- the server clock stepped back a day: the stored string has a day after today; it is kept unchanged
+    S.time = T0
+    local today = ns.scanDay(S.time)
+    H[610002] = ns.histEncode({ { today - 3, 40, 0, 1 }, { today + 1, 45, 0, 1 } })
+    local saved = H[610002]
+    fire("AUCTION_HOUSE_SHOW"); timers = {}
+    S.pages = { { R(610002, 41, 1) } }
+    fire("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED"); fire("AUCTION_HOUSE_CLOSED")
+    ok("history: a string with a day after today is never reset by a write", H[610002] == saved)
+    S.time = T0 + 86400
+    h = ns.histOwn(610002)
+    ok("history: ...and reads with all its days once the clock is past it", #h == 2 and h[2].p == 45, #h)
+    -- a row whose day is already older than the 21 kept takes no place
+    S.time = T0
+    fire("AUCTION_HOUSE_SHOW"); timers = {}
+    S.pages = { { R(610003, 30, 1) } }
+    fire("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
+    S.time = T0 + 22 * 86400
+    fire("AUCTION_HOUSE_CLOSED")
+    ok("history: a row already older than 21 days takes no place", H[610003] == nil)
+    S.time = T0
+end
+
 -- ---- saved history checked at load
 do
     local function boot(saved)
