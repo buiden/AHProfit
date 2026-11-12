@@ -22,8 +22,8 @@ Treat guild-shared and bundled prices as estimates: only your own recent scan re
 
 With [Auctionator](https://www.curseforge.com/wow/addons/auctionator) installed, a price it saw today is used when
 neither you nor the guild has scanned the item, or the newest such scan is more than 24 hours old (before the bundled
-feed). An item missing from a complete scan of yours or the guild's made since Auctionator's day began counts as not
-listed. It is read through Auctionator's public API only; its listed count is not known, so none is shown.
+feed). Auctionator is not asked for an item missing from a complete scan of yours or the guild's made since
+Auctionator's day began. It is read through Auctionator's public API only; its listed count is not known, so none is shown.
 Auctionator fixes its day when it loads, so after midnight its new scans are not used until you `/reload`.
 
 ## Other features
