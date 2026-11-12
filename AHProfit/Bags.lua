@@ -140,8 +140,10 @@ local function protected(s, reagents, sets, keep)
     if TOOLS[s.id] then return "a tool" end
     if reagents[s.id] then return "a class reagent" end
     if s.quest then return "a quest item" end
-    local _, _, quality, _, vendor, classID = info(s.id)
+    local name, _, quality, _, vendor, classID = info(s.id)
+    if not str(name) then return "not loaded yet" end            -- the client has not loaded the item: skipped
     if classID == 12 then return "a quest item" end
+    if classID == 6 then return "ammunition" end
     if classID == 13 then return "a key" end
     if quality == 0 then return nil end                          -- grey: always allowed
     if classID == 0 then return "food, drink or a potion" end
@@ -155,8 +157,9 @@ B.protected = function(s) return protected(s, classReagents(), setSlots(), keepL
 --   { kind = "merge", id, link, frees }   merging partial stacks frees a usable slot
 --   { kind = "destroy", slot, value, how, grey, unknown }  the least valuable eligible slot in a usable bag
 --   { kind = "none" }                     the bags are full and nothing may be suggested
-function B.advise(incoming, threshold)
-    local bags, slots = B.scan()
+function B.advise(incoming, threshold, scanned)
+    local bags, slots
+    if scanned then bags, slots = scanned[1], scanned[2] else bags, slots = B.scan() end
     if not bags or #bags == 0 then return nil end                -- nothing readable: no advice
     local fam = incoming and itemFamily(incoming) or 0
     local free = 0
@@ -201,9 +204,9 @@ function B.advise(incoming, threshold)
     end
     if #cands == 0 then return { kind = "none" } end
     table.sort(cands, function(a, b)
-        if a.grey ~= b.grey then return a.grey end              -- grey first
         if (a.value == nil) ~= (b.value == nil) then return a.value ~= nil end   -- known values before unknown
-        if a.value and a.value ~= b.value then return a.value < b.value end
+        if a.value and a.value ~= b.value then return a.value < b.value end      -- the cheapest slot first
+        if a.grey ~= b.grey then return a.grey end              -- at the same value, grey first
         if a.slot.bag ~= b.slot.bag then return a.slot.bag < b.slot.bag end
         return a.slot.slot < b.slot.slot
     end)
@@ -217,6 +220,9 @@ function B.lootCompare()
     if not (GetNumLootItems and GetLootSlotLink and GetLootSlotInfo) then return nil end
     local ok, n = pcall(GetNumLootItems)
     if not ok or not num(n) then return nil end
+    local bags, slots = B.scan()
+    if not bags then return nil end
+    local scanned = { bags, slots }                              -- one read of the bags for every drop
     local best
     for i = 1, n do
         local okL, link = pcall(GetLootSlotLink, i)
@@ -224,7 +230,7 @@ function B.lootCompare()
         if id then
             local okI, _, _, qty = pcall(GetLootSlotInfo, i)
             qty = (okI and num(qty) and qty > 0) and qty or 1
-            local adv = B.advise(id)
+            local adv = B.advise(id, 0, scanned)
             if adv and adv.kind == "destroy" then
                 local each = unitValue(id, false)
                 local v = each and each * qty or nil
@@ -259,6 +265,7 @@ function B.unkeep(id) local K = keepList(); local had = K[id] ~= nil; K[id] = ni
 local function loadKeep()
     local D = db()
     if not D then return end
+    if ns.sharedOK and not ns.sharedOK() then return end        -- a save from a newer version is left as it is
     if D.keep ~= nil and type(D.keep) ~= "table" then D.keep = {} end
     local n = 0
     for id, v in pairs(D.keep or {}) do
@@ -318,8 +325,12 @@ function B.text(adv, loot)
         if d.value and adv.value then
             L[#L + 1] = "Drop is worth " .. money(d.value) .. ", your cheapest slot is " .. money(adv.value) .. "."
             if loot.skip then L[#L + 1] = "Keep your bags; skip this drop." end
+        elseif d.value then
+            L[#L + 1] = "Drop is worth " .. money(d.value) .. "; your cheapest slot's value is not known."
+        elseif adv.value then
+            L[#L + 1] = "The drop's value is not known; your cheapest slot is " .. money(adv.value) .. "."
         else
-            L[#L + 1] = "The drop's value is not known."
+            L[#L + 1] = "Neither the drop's value nor your cheapest slot's is known."
         end
     end
     return L
@@ -329,27 +340,57 @@ end
 -- A small movable frame: icon, the advice, Show (opens the bags and marks the slot), Keep, and close. Plain
 -- frames only; nothing secure, nothing that acts on items.
 local alert, current
-local function glow(bag, slot)
-    pcall(function() if OpenAllBags then OpenAllBags() end end)
+-- Marks the slot when its bag is open: the open bag frames' item buttons (pooled, unnamed on this client) are
+-- found through EnumerateValidItems, and a frame of our own is laid over the button. The bags are never opened
+-- from here (that could taint the game's buttons), and nothing of the game's is changed.
+local function bagFrames()
+    local out = {}
     pcall(function()
-        for i = 1, 13 do
-            local cf = _G["ContainerFrame" .. i]
-            if cf and cf.IsShown and cf:IsShown() and cf.GetID and cf:GetID() == bag then
-                local name = cf.GetName and cf:GetName()
-                for j = 1, 36 do
-                    local b = name and _G[name .. "Item" .. j]
-                    if b and b.GetID and b:GetID() == slot then
-                        if not alert.mark then alert.mark = alert:CreateTexture(nil, "OVERLAY") end
-                        alert.mark:SetParent(b); alert.mark:SetAllPoints(b)
-                        alert.mark:SetColorTexture(1, 0.2, 0.2, 0.35); alert.mark:Show()
-                        return
-                    end
-                end
-            end
+        if ContainerFrameUtil_EnumerateContainerFrames then
+            for _, fr in ContainerFrameUtil_EnumerateContainerFrames() do out[#out + 1] = fr end
         end
     end)
-    say("bag " .. (bag + 1) .. ", slot " .. slot .. ".")
+    if ContainerFrameCombinedBags then out[#out + 1] = ContainerFrameCombinedBags end
+    return out
 end
+local function glow(bag, slot)
+    local found
+    for _, fr in ipairs(bagFrames()) do
+        if found then break end
+        pcall(function()
+            if not (fr.IsShown and fr:IsShown() and fr.EnumerateValidItems) then return end
+            for _, b in fr:EnumerateValidItems() do
+                local okB, bb = pcall(b.GetBagID, b)
+                local okS, ss = pcall(b.GetID, b)
+                if okB and okS and bb == bag and ss == slot then found = b; return end
+            end
+        end)
+    end
+    if alert.mark then alert.mark:Hide() end
+    if found then
+        if not alert.mark then
+            alert.mark = CreateFrame("Frame", nil, UIParent)
+            alert.mark:SetFrameStrata("TOOLTIP")
+            local t = alert.mark:CreateTexture(nil, "OVERLAY"); t:SetAllPoints(); t:SetColorTexture(1, 0.2, 0.2, 0.35)
+        end
+        alert.mark:ClearAllPoints(); alert.mark:SetAllPoints(found); alert.mark:Show()
+        B.marked = found
+    else
+        B.marked = nil
+    end
+    say("bag " .. (bag + 1) .. ", slot " .. slot .. (found and "." or " (open your bags to see it)."))
+end
+-- Whether the shown slot still holds what the advice says (the bags may have been sorted or changed since).
+local function stillThere(adv)
+    local s = adv and adv.slot
+    if not s then return true end
+    local C = C_Container
+    if not (C and C.GetContainerItemInfo) then return true end
+    B.reads = B.reads + 1
+    local ok, x = pcall(C.GetContainerItemInfo, s.bag, s.slot)
+    return ok and type(x) == "table" and x.itemID == s.id and x.stackCount == s.n
+end
+B.reads = 0
 local function build()
     if alert then return alert end
     local f = CreateFrame("Frame", "AHProfitBagAlert", UIParent)
@@ -369,15 +410,22 @@ local function build()
         b:SetSize(70, 20); b:SetPoint("BOTTOMLEFT", x, 8); b:SetText(label); b:SetScript("OnClick", fn)
         return b
     end
-    f.show = button("Show", 48, function() if current and current.slot then glow(current.slot.bag, current.slot.slot) end end)
+    f.show = button("Show", 48, function()
+        if not (current and current.slot) then return end
+        if not stillThere(current) then B.check(nil, true) end     -- re-advise first: never point at what moved
+        if current and current.slot then glow(current.slot.bag, current.slot.slot) end
+    end)
     f.keepBtn = button("Keep", 124, function()
-        if current and current.slot then B.keep(current.slot.id); say("kept; it will not be suggested again (/ahp unkeep to undo)."); B.check(nil, true) end
+        if not (current and current.slot) then return end
+        if B.keep(current.slot.id) then say("kept; it will not be suggested again (/ahp unkeep to undo)."); B.check(nil, true)
+        else say("the keep list is full (" .. KEEP_MAX .. "); /ahp unkeep an item first.") end
     end)
     f.close = button("Close", 200, function() f:Hide() end)
     local D = db()
     local pos = D and type(D.bagAlertPos) == "table" and D.bagAlertPos
-    if pos and str(pos[1]) and str(pos[2]) and num(pos[3]) and num(pos[4]) then f:SetPoint(pos[1], UIParent, pos[2], pos[3], pos[4])
-    else f:SetPoint("TOP", UIParent, "TOP", 0, -140) end
+    local placed = pos and str(pos[1]) and str(pos[2]) and num(pos[3]) and num(pos[4])
+        and pcall(f.SetPoint, f, pos[1], UIParent, pos[2], pos[3], pos[4])
+    if not placed then f:ClearAllPoints(); f:SetPoint("TOP", UIParent, "TOP", 0, -140) end
     f:Hide()
     alert = f
     return f
@@ -413,17 +461,29 @@ local function generalFree()
 end
 B.generalFree = generalFree
 local function threshold() local D = db(); return (D and num(D.bagfull)) and D.bagfull or 0 end
--- Shows the advice when it is due. err: an "inventory is full" error just happened. force: show again (Keep).
+local function clock() return (GetTime and GetTime()) or ns.now() end
+local lastErrAt = -1e9
+-- Shows the advice when it is due. err: an "inventory is full" error just happened. force: show again (Keep, or
+-- the shown slot changed).
 function B.check(err, force)
     local th = threshold()
     if th < 0 then alerted = false; return end
+    if err and not force then                                    -- a burst of errors (spam-looting): one scan
+        local t = clock()
+        if t - lastErrAt < 0.5 and alerted then return end
+        lastErrAt = t
+    end
     if lootOpen and err then
         local loot = B.lootCompare()
-        if loot then B.show(loot.advice, loot); return end
+        if loot then alerted = true; B.show(loot.advice, loot); return end
     end
     if not err then                                              -- the frequent bag update: count free slots first
         local free = generalFree()
         if free and free > th then alerted = false; if alert and alert:IsShown() then alert:Hide() end return end
+        if alerted and not force then                            -- still full: only check the slot that is shown
+            if alert and alert:IsShown() and current and current.slot and not stillThere(current) then force = true
+            else return end
+        end
     end
     local adv = B.advise(nil, err and 0 or th)
     if not adv then alerted = false; if alert and alert:IsShown() and not err then alert:Hide() end return end

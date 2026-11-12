@@ -41,6 +41,7 @@ function GetNumLootItems() return #W.loot end
 function GetLootSlotLink(i) return W.loot[i] and ("|Hitem:" .. W.loot[i][1] .. "::|h") end
 function GetLootSlotInfo(i) return 1, "x", W.loot[i][2] end
 function OpenAllBags() W.opened = W.opened + 1 end
+function GetTime() return W.clock or W.time end
 -- frames: event frames keep their handler; anything else accepts any call
 local FM = {}
 FM.__index = function(t, k)
@@ -128,10 +129,18 @@ ok("value: when everything is unknown, one is still offered, marked unknown", a.
 setup({ [0] = bag(3, 0, { { 7777, 1 }, { 2589, 20 }, { 1201, 1 } }) })
 a = B.advise(nil)
 ok("value: unknown is ranked after known", a.slot.id == 2589)
-setup({ [0] = bag(3, 0, { { 2770, 1 }, { 3300, 5 }, { 1200, 1 } }) })
-W.ah[3300] = nil
+setup({ [0] = bag(2, 0, { { 2589, 1 }, { 3300, 5 } }) })
 a = B.advise(nil)
-ok("value: grey items come first, cheapest grey first", a.grey and a.slot.id == 1200 and a.value == 30, a.slot.id)
+ok("value: the cheapest slot wins even over grey (1 linen 13c before 5 grey feet 50c)", a.slot.id == 2589 and a.value == 13 and not a.grey, a.slot.id)
+W.loot = { { 2880, 1 } }                                         -- a 25c drop: worth more than the 13c slot
+local Lg = B.lootCompare()
+ok("value: ...and the skip-drop comparison uses that cheapest slot (25c drop: take it)", Lg and Lg.advice.value == 13 and Lg.drop.value == 25 and not Lg.skip, Lg and Lg.advice.value)
+W.loot = {}
+setup({ [0] = bag(2, 0, { { 2880, 1 }, { 3300, 1 } }) })
+W.ah[2880] = nil; IT[3300][4] = 25
+a = B.advise(nil)
+ok("value: at the same value, grey first", a.grey and a.slot.id == 3300, a.slot.id)
+IT[3300][4] = 10
 setup({ [0] = bag(2, 0, { { 1201, 1, true }, { 4306, 20 } }) })
 W.ah[1201] = 99999
 a = B.advise(nil)
@@ -223,7 +232,7 @@ fire("UI_ERROR_MESSAGE", 3, "Inventory is full.")
 local fr = B.frame()
 local opened = W.opened
 rawget(fr.show, "scripts").OnClick()
-ok("alert: Show opens the bags and names the slot", W.opened == opened + 1 and chat[#chat]:find("bag 1, slot 1.", 1, true), chat[#chat])
+ok("alert: Show never opens the bags; with them closed it names the slot in chat", W.opened == opened and chat[#chat]:find("bag 1, slot 1 (open your bags to see it).", 1, true), chat[#chat])
 rawget(fr.keepBtn, "scripts").OnClick()
 ok("alert: Keep adds the item to the keep list and moves on to the next slot", AHProfitDB.keep[2770] == true and plain(B.lastText[1]):find("Linen Cloth", 1, true), B.lastText and plain(B.lastText[1]))
 ok("alert: it is shown", fr:IsShown())
@@ -251,6 +260,79 @@ print(string.format("COST full 180-slot advice %.2f ms each", ms))
 ok("cost: full advice over 180 slots under 5 ms", ms < 5, ms)
 C_Container.GetContainerItemInfo = realInfo
 
+-- ---- review fixes (PR-F)
+-- F1: the bags were sorted after the alert: a bag update re-reads the shown slot and re-advises; Show re-checks
+setup({ [0] = bag(3, 0, { { 2589, 1 }, { 9999, 1 }, { 4306, 20 } }) })
+fire("BAG_UPDATE_DELAYED")
+ok("F1: the alert names the linen in slot 1", plain(B.lastText[1]):find("Linen Cloth", 1, true))
+W.bags[0].slots[1], W.bags[0].slots[2] = W.bags[0].slots[2], W.bags[0].slots[1]   -- sorted: the gem moves to slot 1
+fire("BAG_UPDATE_DELAYED")
+local fr1 = B.frame()
+rawget(fr1.show, "scripts").OnClick()
+ok("F1: after a swap the advice follows the linen to slot 2", plain(B.lastText[1]):find("Linen Cloth", 1, true) and chat[#chat]:find("slot 2", 1, true), chat[#chat])
+-- the same swap with the alert not refreshed by a bag update (Show alone)
+W.bags[0].slots[1], W.bags[0].slots[2] = W.bags[0].slots[2], W.bags[0].slots[1]
+rawget(fr1.show, "scripts").OnClick()
+ok("F1: Show re-checks the slot before naming it", chat[#chat]:find("slot 1", 1, true) and plain(B.lastText[1]):find("Linen Cloth", 1, true), chat[#chat])
+-- F3: pooled, unnamed item buttons in an open bag frame; the bags are never opened by the addon
+local function button(bagID, slot) local b = setmetatable({}, FM); rawset(b, "GetBagID", function() return bagID end); rawset(b, "GetID", function() return slot end); return b end
+local pool = setmetatable({}, FM); rawset(pool, "shown", true)
+local btns = { button(0, 3), button(0, 1), button(0, 2) }
+rawset(pool, "EnumerateValidItems", function() local i = 0; return function() i = i + 1; if btns[i] then return i, btns[i] end end end)
+function ContainerFrameUtil_EnumerateContainerFrames() local i = 0; local list = { pool }; return function() i = i + 1; if list[i] then return i, list[i] end end end
+local before = W.opened
+rawget(fr1.show, "scripts").OnClick()
+ok("F3: with the bag open, the pooled button for the slot is marked", B.marked == btns[2] and W.opened == before and chat[#chat]:find("bag 1, slot 1.", 1, true), chat[#chat])
+rawset(pool, "shown", false)
+rawget(fr1.show, "scripts").OnClick()
+ok("F3: with the bag closed, only the chat line", B.marked == nil and W.opened == before)
+rawset(pool, "EnumerateValidItems", function() error("broken pool") end); rawset(pool, "shown", true)
+ok("F3: a broken bag frame is ignored", pcall(rawget(fr1.show, "scripts").OnClick) and B.marked == nil)
+ContainerFrameUtil_EnumerateContainerFrames = nil
+-- F4: slot reads
+setup({ [0] = bag(36, 0, full(36)), [1] = bag(36, 0, full(36)), [2] = bag(36, 0, full(36)), [3] = bag(36, 0, full(36)), [4] = bag(36, 0, full(36)) })
+W.bags[0].slots[1] = { 2589, 1 }
+local reads, realInfo2 = 0, C_Container.GetContainerItemInfo
+C_Container.GetContainerItemInfo = function(...) reads = reads + 1; return realInfo2(...) end
+fire("BAG_UPDATE_DELAYED")
+local first = reads; reads = 0
+for _ = 1, 20 do fire("BAG_UPDATE_DELAYED") end
+ok("F4: while full and alerted, a bag update reads only the shown slot", first == 180 and reads == 20, first .. " / " .. reads)
+reads = 0
+W.clock = 100
+for _ = 1, 20 do fire("UI_ERROR_MESSAGE", 3, "Inventory is full."); W.clock = W.clock + 0.01 end
+ok("F4: a burst of 20 full errors within half a second scans once", reads == 180, reads)
+reads = 0; W.clock = W.clock + 1
+W.loot = { { 2770, 1 }, { 2880, 1 }, { 9999, 1 }, { 765, 1 }, { 1201, 1 } }
+fire("LOOT_OPENED"); fire("UI_ERROR_MESSAGE", 3, "Inventory is full.")
+ok("F4: a 5-item loot window reads the bags once", reads == 180, reads)
+fire("LOOT_CLOSED"); W.loot = {}
+C_Container.GetContainerItemInfo = realInfo2
+-- should-fixes
+setup({ [0] = bag(3, 0, { { 8000, 200 }, { 8001, 1 }, { 2589, 20 } }) })
+IT[8000] = { "Rough Arrow", 1, 200, 1, 6, 1 }
+local s8 = { bag = 0, slot = 1, id = 8000, n = 200 }
+ok("never: ammunition", B.protected(s8) ~= nil)
+ok("never: an item the client has not loaded yet is skipped", B.protected({ bag = 0, slot = 2, id = 8001, n = 1 }) == "not loaded yet")
+IT[8000] = nil
+local tx = plain(table.concat(B.text({ kind = "destroy", slot = { id = 2589, n = 1 }, value = nil, unknown = true }, { drop = { value = 500 } }), " / "))
+ok("text: an unknown slot value is not called the drop's", tx:find("Drop is worth 5s 0c; your cheapest slot's value is not known.", 1, true), tx)
+tx = plain(table.concat(B.text({ kind = "destroy", slot = { id = 2589, n = 1 }, value = 13 }, { drop = { value = nil } }), " / "))
+ok("text: an unknown drop value", tx:find("The drop's value is not known; your cheapest slot is 13c.", 1, true), tx)
+setup({ [0] = bag(2, 0, { { 2770, 1 }, { 4306, 20 } }) })
+for i = 1, 500 do B.keep(300000 + i) end
+fire("UI_ERROR_MESSAGE", 3, "Inventory is full.")
+rawget(B.frame().keepBtn, "scripts").OnClick()
+ok("keep: with the list full, Keep says so and claims nothing", chat[#chat]:find("keep list is full", 1, true) and AHProfitDB.keep[2770] == nil, chat[#chat])
+db = boot({ v = 99, keep = { [5] = true, x = "bad" }, bagfull = "lots" })
+ok("newer save: keep and bagfull are left as they are", db.keep.x == "bad" and db.bagfull == "lots")
+setup({ [0] = bag(1, 0, { { 2770, 1 } }) })
+AHProfitDB.bagAlertPos = { "NOWHERE", "BAD", 1, 2 }
+local realCF = CreateFrame
+CreateFrame = function(...) local fr = realCF(...); rawset(fr, "SetPoint", function(_, p) if p == "NOWHERE" then error("bad point") end end); return fr end
+ok("position: a damaged saved position falls back without an error", pcall(fire, "UI_ERROR_MESSAGE", 3, "Inventory is full.") and B.lastText ~= nil)
+CreateFrame = realCF
+
 -- ---- unreadable client data never errors
 setup({ [0] = bag(2, 0, { { 2770, 1 }, { 4306, 20 } }) })
 W.bags[0].slots[1].boom = true
@@ -275,6 +357,7 @@ for _, fn in ipairs({ "DeleteCursorItem", "PickupContainerItem", "UseContainerIt
     if src:find(fn, 1, true) then bad[#bad + 1] = fn end
 end
 ok("advice only: no call that deletes, moves, uses or sells an item", #bad == 0, table.concat(bad, ","))
+ok("advice only: the bags are never opened by the addon (taint)", not assert(io.open("AHProfit/Bags.lua")):read("*a"):find("OpenAllBags", 1, true))
 
 for _, m in ipairs(chat) do if m:find("rror") then ok("no error in chat: " .. m, false) end end
 print(pass .. " passed, " .. fail .. " failed")
