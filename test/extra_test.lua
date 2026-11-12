@@ -165,6 +165,47 @@ do
     ok("25% under the middle of its daily prices is a deal", #d == 3 and d[3].kind == "dip" and d[3].usual == 100 and d[3].days == 5 and math.abs(d[3].below - 0.25) < 1e-9, #d)
     price(a, 2840, 10, 5)
     ok("two days of history is too little to call a price usual", #as(a).deals() == 3 + 0 and as(a).deals()[3].id == 2770)
+    -- PR-B: dips from your own daily history (AHProfitDB.hist) first, the bundled file otherwise
+    local Hh = a.ns.histHouse and a.ns.histHouse() or {}
+    local sd = a.ns.scanDay and a.ns.scanDay(GetServerTime()) or 0
+    local function days(id, list) local e = {}; for i, p in ipairs(list) do e[i] = { sd - #list + i, p, 0, 1 } end; Hh[id] = a.ns.histEncode(e); if a.ns.histChanged then a.ns.histChanged() end end
+    local function dip(id) for _, x in ipairs(as(a).deals()) do if x.kind == "dip" and x.id == id then return x end end end
+    ok("bundled history is the source while you have under 5 own days", dip(2770) and dip(2770).usual == 100 and not dip(2770).own)
+    days(2770, { 40, 42, 38, 41, 40 })
+    local own = dip(2770)
+    ok("5 own days: your own history decides, and 75 is not a dip against your usual 40", own == nil, own and own.usual)
+    price(a, 2770, 29, 500)
+    own = dip(2770)
+    ok("an own-history dip says so", own and own.own == true and own.usual == 40 and own.days == 5, own and tostring(own.own))
+    IT[104] = { "Own Only", 0 }
+    days(104, { 200, 210, 190, 205 }); price(a, 104, 100, 3)
+    ok("an item outside the bundled file: no dip with 4 own days", dip(104) == nil)
+    days(104, { 200, 210, 190, 205, 200 })
+    own = dip(104)
+    ok("an item outside the bundled file: a dip after 5 own days", own and own.own and own.usual == 200 and own.name == "Own Only", own and own.usual)
+    -- the usual prices are kept between clicks until the history changes
+    local X2 = as(a)
+    local calls, real = 0, a.ns.histOwn
+    a.ns.histOwn = function(id) calls = calls + 1; return real(id) end
+    X2.deals(); calls = 0; X2.deals(); X2.deals()
+    ok("deals: history is not decoded again while it is unchanged", calls == 0, calls)
+    price(a, 2770, 28, 500); X2.deals()
+    ok("deals: a new auction price alone does not decode the history again", calls == 0, calls)
+    days(104, { 200, 210, 190, 205, 201 }); X2.deals()
+    ok("deals: after a history change only the changed item is decoded again", calls == 1, calls)
+    local d104
+    for _, x in ipairs(X2.deals()) do if x.id == 104 then d104 = x end end
+    ok("deals: ...and its new usual price is used", d104 and d104.usual == 201, d104 and d104.usual)
+    a.ns.histOwn = real
+    -- the list handed out is a copy: changing it does not change the next answer
+    local u1 = X2.usualPrices and X2.usualPrices() or {}
+    for _, u in ipairs(u1) do u.med = 1e9 end
+    local d104b
+    for _, x in ipairs(X2.deals()) do if x.id == 104 then d104b = x end end
+    ok("deals: the usual prices handed out are a copy", d104b and d104b.usual == 201, d104b and d104b.usual)
+    Hh[104], Hh[2770], IT[104] = nil, nil, nil
+    if a.ns.histChanged then a.ns.histChanged() end
+    price(a, 2770, 75, 500)
     a.ns.hist = nil
     price(a, 2840, 50, 300); price(a, 2770, 30, 500)
 end

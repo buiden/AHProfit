@@ -323,8 +323,8 @@ local function dealEntries()
                 detail = function()
                     return { "|cffffd100" .. d.name .. "|r  cheaper than usual",
                         "AH lowest now (" .. fresh(d.src, d.t, d.from) .. "): " .. coin(d.price) .. " each, " .. d.qty .. " listed",
-                        "Usual price: " .. coin(d.usual) .. grey("  the middle of its daily prices over " .. d.days .. " days"),
-                        "That is " .. pct(d.below) .. " lower. The Prices tab shows its graph.",
+                        "Usual price: " .. coin(d.usual) .. grey("  the middle of its daily prices over " .. d.days .. " days" .. (d.own and ", from your own scans" or ", from the bundled price feed")),
+                        "That is " .. pct(d.below) .. " lower." .. (d.own and "" or " The Prices tab shows its graph."),
                         grey("A low price can stay low. This is not a promise that it rises again.") }
                 end }
         end

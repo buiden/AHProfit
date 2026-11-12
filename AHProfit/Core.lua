@@ -43,21 +43,22 @@ local function live()
 end
 ns.live = live
 
+-- Saved-data version (DB.v): 1 added DB.shared (guild prices), 2 added DB.hist (daily history of your own scans).
+-- A save written by a newer version (DB.v > KNOWN_V) is left untouched; this version then uses neither layer, and
+-- neither stores nor shows received prices (ns.sharedOK() is false; Sync.lua refuses them).
 -- Prices received from guild members (Sync.lua) live in their own layer, one per auction house: they never change
--- or delete your own scans. DB.v 1 introduced it; from = { [scan time] = sender name }. A save written by a newer
--- version (DB.v > 1) is left untouched, and this version then neither stores nor shows received prices
--- (ns.sharedOK() is false; Sync.lua refuses them). Received prices older than 12 hours are dropped.
-local SHARED_V, MAX_HOUSES, SHARED_KEEP = 1, 8, 43200
+-- or delete your own scans. from = { [scan time] = sender name }. Received prices older than 12 hours are dropped.
+local KNOWN_V, MAX_HOUSES, SHARED_KEEP = 2, 8, 43200
 local spare = { p = {}, q = {}, t = {}, full = 0, from = {} }
 local function shared()
-    if DB.v ~= SHARED_V then return spare end
+    if DB.v ~= KNOWN_V then return spare end
     local k = houseKey()
     local H = DB.shared[k]
     if not H then H = { p = {}, q = {}, t = {}, full = 0, from = {} }; DB.shared[k] = H end
     return H
 end
 ns.shared = shared
-ns.sharedOK = function() return DB ~= nil and DB.v == SHARED_V end
+ns.sharedOK = function() return DB ~= nil and DB.v == KNOWN_V end
 local function okNum(v, max) return type(v) == "number" and v >= 0 and v <= max and v == math.floor(v) end
 -- Drops received prices older than 12 hours and sender names no stored price uses. Returns the item count.
 local function pruneShared(H)
@@ -72,10 +73,14 @@ local function pruneShared(H)
 end
 ns.pruneShared = pruneShared
 -- Checks the saved shared layer at load: wrong types are dropped, at most MAX_HOUSES houses (the newest kept).
+local loadHist
 local function loadShared()
-    if type(DB.v) == "number" and DB.v > SHARED_V then return end
-    if DB.v ~= SHARED_V or type(DB.shared) ~= "table" then DB.shared = {} end
-    DB.v = SHARED_V
+    if type(DB.v) == "number" and DB.v > KNOWN_V then return end
+    local v = type(DB.v) == "number" and DB.v or 0
+    if v < 1 or type(DB.shared) ~= "table" then DB.shared = {} end
+    if v < 2 or type(DB.hist) ~= "table" then DB.hist = {} end
+    DB.v = KNOWN_V
+    loadHist()
     local keys = {}
     for k, H in pairs(DB.shared) do
         if type(k) ~= "string" or type(H) ~= "table" then DB.shared[k] = nil
@@ -139,6 +144,197 @@ local function srcLabel(src, t, from)
 end
 ns.srcLabel = srcLabel
 
+-- ------------------------------------------------------------------ daily history of your own auction house scans --
+-- DB.hist[house][itemID] = one string per item: for each recorded scan day, oldest first, four numbers
+-- (day step, h, l, a) as base-32 digits (the alphabet of Sync.lua; a digit of 32 or more means "more digits
+-- follow"). The first day step is the day itself, later ones the gap to the previous day (at least 1).
+-- day = whole days since 2020-01-01 UTC; h = the highest of the day's lowest prices, l = the lowest one (0 when
+-- it equals h), a = the most listed. A string is decoded only when that item's history is read or written.
+-- Written from every own browse result, full scans and searches alike, once per query with that query's lowest
+-- price per item. Guild prices never enter it. Kept 21 days; at most HIST_ITEMS items per house, 8 houses.
+local DAY0, HIST_DAYS, HIST_ITEMS, HIST_LEN = 1577836800, 21, 10000, 1024
+ns.HIST_ITEMS = HIST_ITEMS
+local function scanDay(t) return math.floor((t - DAY0) / 86400) end
+ns.scanDay = scanDay
+local A64 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+/"
+local D64 = {}
+for i = 1, 64 do D64[A64:byte(i)] = i - 1 end
+local function put(buf, v)
+    while v >= 32 do
+        local d = v % 32
+        buf[#buf + 1] = A64:sub(d + 33, d + 33)
+        v = (v - d) / 32
+    end
+    buf[#buf + 1] = A64:sub(v + 1, v + 1)
+end
+local function take(s, i, n)
+    local v, mult = 0, 1
+    while true do
+        if i > n or mult > 1099511627776 then return nil end
+        local c = D64[s:byte(i)]
+        if not c then return nil end
+        i = i + 1
+        if c >= 32 then v = v + (c - 32) * mult; mult = mult * 32
+        else return v + c * mult, i end
+    end
+end
+-- Days oldest first, { { d, h, l, a }, ... } with l = 0 when it equals h. The list is assumed checked.
+local function histEncode(days)
+    local buf, prev = {}, 0
+    for _, e in ipairs(days) do
+        put(buf, e[1] - prev); put(buf, e[2]); put(buf, e[3]); put(buf, e[4])
+        prev = e[1]
+    end
+    return table.concat(buf)
+end
+-- Decodes and checks one item's string: days increasing and not after today, prices 1..1e12, a low below its high
+-- (or 0), counts up to 1e9. Days older than 21 are dropped. nil when anything is wrong (the item is then dropped).
+local function histDecode(s, today)
+    if type(s) ~= "string" or #s == 0 or #s > HIST_LEN then return nil end
+    local out, i, n, day = {}, 1, #s, 0
+    while i <= n do
+        local step, h, l, a
+        step, i = take(s, i, n); if not step or (day > 0 and step < 1) then return nil end
+        h, i = take(s, i, n); if not h or h < 1 or h > 1e12 then return nil end
+        l, i = take(s, i, n); if not l or l >= h then return nil end
+        a, i = take(s, i, n); if not a or a > 1e9 then return nil end
+        day = day + step
+        if day > today or day > 1e5 then return nil end
+        if day > today - HIST_DAYS then out[#out + 1] = { day, h, l, a } end
+    end
+    return out
+end
+ns.histEncode, ns.histDecode = histEncode, histDecode
+local histCount = setmetatable({}, { __mode = "k" })
+-- histVersion changes whenever any history string is written or dropped, so readers can cache decoded results.
+local histVersion = 0
+ns.histVersion = function() return histVersion end
+ns.histChanged = function() histVersion = histVersion + 1 end
+local function histHouseOf(k)
+    if DB.v ~= KNOWN_V then return nil end
+    local H = DB.hist[k]
+    if not H then H = {}; DB.hist[k] = H; histCount[H] = 0 end
+    if not histCount[H] then local n = 0; for _ in pairs(H) do n = n + 1 end; histCount[H] = n end
+    return H
+end
+local function histHouse() return histHouseOf(houseKey()) end
+ns.histHouse = histHouse
+-- Whether a stored string may be dropped: damaged, or every recorded day expired. A string with a day after today
+-- (the server clock went back) is unreadable for now but kept: it reads again once the clock is past that day.
+local function histDroppable(e, today)
+    local d = histDecode(e, today)
+    if d then return #d == 0 end
+    return histDecode(e, 1e5) == nil                             -- nil: damaged; a list: only dated in the future
+end
+-- Items that may be dropped give their place back. This looks at up to max items per call, continuing where the
+-- last call stopped; it returns how many it looked at and whether it reached the end of the house.
+local sweepAt = setmetatable({}, { __mode = "k" })
+local function histSweep(H, today, max)
+    local k, used = sweepAt[H], 0
+    if k ~= nil and H[k] == nil then k = nil end
+    while used < max do
+        local id, e = next(H, k)
+        if id == nil then sweepAt[H] = nil; return used, true end -- went round once
+        used = used + 1
+        if histDroppable(e, today) then H[id] = nil; histCount[H] = histCount[H] - 1; histVersion = histVersion + 1
+        else k = id end
+    end
+    sweepAt[H] = k
+    return used, false
+end
+-- The first time a house is full on a given day, one sweep of the whole house starts, SWEEP_STEP items per frame.
+-- Until it has gone round, a new item that finds the house full waits (its row stays queued for the next frame);
+-- once it has, a house that is still full has no expired items, and new items are dropped until the next day.
+local SWEEP_STEP, BATCH_SWEEP = 200, 50  -- per frame: the whole-house pass, and what one batch of rows may add
+local capPass = setmetatable({}, { __mode = "k" })               -- house -> { day, done }
+local capSweep
+local function capNext(H, pass)
+    if C_Timer and C_Timer.After then C_Timer.After(0, function() if capPass[H] == pass and not pass.done then capSweep(H, pass) end end)
+    else pass.done = true end
+end
+capSweep = function(H, pass)
+    local _, round = histSweep(H, scanDay(now()), SWEEP_STEP)
+    if round then pass.done = true else capNext(H, pass) end
+end
+local sweepLeft, canWait = 0, false -- decodes the sweep may still spend in this batch; whether a row may wait
+local function histAdd(H, id, p, q, day)
+    if not (okNum(p, 1e12) and p >= 1 and okNum(q, 1e9) and okNum(day, 1e5)) then return end   -- a bad row takes no place
+    local days
+    if H[id] == nil then
+        if histCount[H] >= ns.HIST_ITEMS then
+            local today = scanDay(now())
+            local pass = capPass[H]
+            if not pass or pass.day ~= today then
+                pass = { day = today }; capPass[H] = pass; sweepAt[H] = nil
+                capNext(H, pass)                                 -- starts on the next frame
+            end
+            while histCount[H] >= ns.HIST_ITEMS and not pass.done and sweepLeft > 0 do
+                local used, round = histSweep(H, today, math.min(sweepLeft, 50))
+                sweepLeft = sweepLeft - used
+                if round then pass.done = true end
+            end
+            if histCount[H] >= ns.HIST_ITEMS then return (canWait and not pass.done) and "wait" or nil end
+        end
+        days = {}
+        histCount[H] = histCount[H] + 1
+    else
+        days = histDecode(H[id], day) or {}                     -- a damaged string starts over
+    end
+    local last = days[#days]
+    if last and last[1] == day then
+        local hi = last[2] > p and last[2] or p
+        local lo = last[3] > 0 and last[3] or last[2]
+        lo = lo < p and lo or p
+        last[2], last[3] = hi, lo < hi and lo or 0
+        if q > last[4] then last[4] = q end
+    else
+        days[#days + 1] = { day, p, 0, q }
+    end
+    H[id] = histEncode(days)
+    histVersion = histVersion + 1
+end
+-- Daily prices of one item from your own scans, oldest first: { { d = day, p = h, l = l or h, a = a }, ... }.
+function ns.histOwn(id)
+    local H = histHouse()
+    local days = H and H[id] and histDecode(H[id], scanDay(now()))
+    if H and H[id] and (not days or #days == 0) and histDroppable(H[id], scanDay(now())) then   -- expired or damaged
+        H[id] = nil; histCount[H] = histCount[H] - 1; histVersion = histVersion + 1
+    end
+    local out = {}
+    for _, e in ipairs(days or {}) do out[#out + 1] = { d = e[1], p = e[2], l = e[3] > 0 and e[3] or e[2], a = e[4] } end
+    return out
+end
+-- At load only cheap checks: wrong key or value types and over-long strings dropped, the item cap; strings are
+-- checked when decoded. With more than 8 houses, the ones scanned most recently are kept (this decodes them).
+loadHist = function()
+    local keys = {}
+    for k, H in pairs(DB.hist) do
+        if type(k) ~= "string" or type(H) ~= "table" then DB.hist[k] = nil
+        else
+            local n = 0
+            for id, e in pairs(H) do
+                if not (okNum(id, 1e7) and type(e) == "string" and #e > 0 and #e <= HIST_LEN) or n >= HIST_ITEMS then H[id] = nil
+                else n = n + 1 end
+            end
+            histCount[H] = n
+            keys[#keys + 1] = k
+        end
+    end
+    if #keys > MAX_HOUSES then
+        local today, newest = scanDay(now()), {}
+        for _, k in ipairs(keys) do
+            local m = -1
+            for _, e in pairs(DB.hist[k]) do
+                local days = histDecode(e, today)
+                if days and days[#days] and days[#days][1] > m then m = days[#days][1] end
+            end
+            newest[k] = m
+        end
+        table.sort(keys, function(a, b) return newest[a] > newest[b] end)
+        for i = MAX_HOUSES + 1, #keys do DB.hist[keys[i]] = nil end
+    end
+end
+
 local GREY, WHITE, GREEN, RED = { .6, .6, .6 }, { 1, 1, 1 }, { .25, 1, .25 }, { 1, .3, .3 }
 local function line(tt, l, r, lc, rc)
     tt:AddDoubleLine(l, r, lc[1], lc[2], lc[3], rc[1], rc[2], rc[3])
@@ -189,6 +385,57 @@ end
 -- ------------------------------------------------------------------ recording the auction house while it is open --
 local open, scanning, waitingThrottle, pendingStart = false, false, false, false
 local scanId, seen, scanCount = 0, {}, 0
+local pend = {}                    -- items seen in the current query, written to the daily history when it ends
+-- Writing re-encodes each item's string, so a full scan of thousands of items is spread over frames: up to
+-- HIST_BATCH items per frame, the rest on the next ones. Whatever is still waiting is written at logout (and at
+-- /reload), before the game saves. The queue runs from qh to qt (explicit bounds: Lua 5.1's # is undefined on a
+-- table with holes). Each row carries the house and the day it was scanned on. A row that fails is skipped; the
+-- rest go on.
+local HIST_BATCH, SWEEP_LOGOUT = 400, 1000
+local queue, qh, qt, qBusy, waiting = {}, 1, 0, false, {}
+local function histRows(stop)
+    while qh <= stop do
+        local w = queue[qh]
+        queue[qh] = nil; qh = qh + 1                             -- past it first, so an error skips only this row
+        local H = histHouseOf(w[5])
+        if H and histAdd(H, w[1], w[2], w[3], w[4]) == "wait" then waiting[#waiting + 1] = w end
+    end
+end
+local function histStep(all, sweep, final)
+    sweepLeft, canWait = sweep or BATCH_SWEEP, not final        -- at logout nothing can wait
+    local stop = all and qt or math.min(qt, qh + HIST_BATCH - 1)
+    while qh <= stop do pcall(histRows, stop) end
+    -- Rows waiting for the sweep go to the end of the queue and are tried again on a later frame; the rest of the
+    -- batch is written meanwhile.
+    for i = 1, #waiting do qt = qt + 1; queue[qt] = waiting[i] end
+    waiting = {}
+    if qh > qt then queue, qh, qt, qBusy = {}, 1, 0, false; return end
+    qBusy = true
+    if C_Timer and C_Timer.After then C_Timer.After(0, function() histStep(false) end)
+    elseif not all then histStep(true) end
+end
+local function flushHist()
+    local k = next(pend) and DB.v == KNOWN_V and houseKey()
+    if k then
+        local L = live()
+        for id, day in pairs(pend) do
+            local p, q = L.p[id], L.q[id]
+            if p then qt = qt + 1; queue[qt] = { id, p, q or 0, day, k } end
+        end
+    end
+    pend = {}
+    if qBusy or qh > qt then return end
+    if qt - qh + 1 <= HIST_BATCH then histStep(true) else qBusy = true; histStep(false) end
+end
+-- At logout: everything still waiting, then a little more of the sweep for the current house.
+ns.histFinish = function()
+    pcall(function()
+        flushHist()
+        if qh <= qt then histStep(true, SWEEP_LOGOUT, true) end
+        local H = histHouse()
+        if H then histSweep(H, scanDay(now()), SWEEP_LOGOUT) end
+    end)
+end
 
 local function record(results)
     if type(results) ~= "table" then return end
@@ -205,12 +452,14 @@ local function record(results)
                 seen[id] = scanId; scanCount = scanCount + 1
                 L.p[id], L.q[id], L.t[id] = price, q, t
             end
+            pend[id] = pend[id] or scanDay(t)                    -- the day it was seen, even if written after midnight
         end
     end
 end
 
 local function finish()
     scanning = false
+    flushHist()
     local L, known = live(), 0
     for _ in pairs(L.p) do known = known + 1 end
     -- Only a scan that plausibly covered the whole house may forget items; a narrow search must not wipe the rest.
@@ -293,6 +542,7 @@ f:SetScript("OnEvent", function(_, ev, a1)
         if DB.cut ~= 5 and DB.cut ~= 15 then DB.cut = 5 end
         DB.live = DB.live or {}
         loadShared()
+        f:RegisterEvent("PLAYER_LOGOUT")
         if ns.tools then
             for _, e in ipairs(ns.tools.events) do f:RegisterEvent(e) end
             ns.tools.init()
@@ -309,9 +559,13 @@ f:SetScript("OnEvent", function(_, ev, a1)
     elseif ev == "AUCTION_HOUSE_SHOW" then
         open = true
         if DB.autoscan and C_AuctionHouse and C_AuctionHouse.SendBrowseQuery and now() - math.max(live().full, shared().full) > 900 then C_Timer.After(1, function() if open and not scanning then startScan(true) end end) end
+    elseif ev == "PLAYER_LOGOUT" then
+        ns.histFinish()                                          -- the game saves right after this
     elseif ev == "AUCTION_HOUSE_CLOSED" then
+        flushHist()
         open, scanning, waitingThrottle, pendingStart = false, false, false, false
     elseif ev == "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED" then
+        flushHist()                                              -- a new query: the previous one is complete
         scanId = scanId + 1; scanCount = 0
         record(C_AuctionHouse.GetBrowseResults())
         page()
