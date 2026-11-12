@@ -195,12 +195,16 @@ do
     ok("item cap default", cap == 60000)
     Yb.MAXITEMS = n0 + 1
     W.time = W.time + 10; now = math.floor(W.time)
-    inject("H1,510005," .. (now + 299) .. ",3,1"); inject("D510005,1,1E11E11E1")     -- items 1, 2, 3
+    inject("H1,510005," .. (now + 299) .. ",4,1"); inject("D510005,1,1E11E11E1")     -- items 1, 2, 3 of 4 announced
     local n1 = 0; for _ in pairs(G(b).p) do n1 = n1 + 1 end
-    ok("item cap: only one new item stored, existing ones still update", n1 == n0 + 1 and G(b).p[1] == 14 and G(b).p[2] == nil and G(b).p[3] == nil, n1 - n0)
-    ok("item cap: a capped scan is not marked complete and deletes nothing", G(b).full == tscan and G(b).p[1006] == before, G(b).full - tscan)
+    ok("item cap: an unfinished transfer stores only one new item, existing ones still update", n1 == n0 + 1 and G(b).p[1] == 14 and G(b).p[2] == nil and G(b).p[3] == nil, n1 - n0)
+    ok("item cap: an unfinished transfer is not marked complete and deletes nothing", G(b).full == tscan and G(b).p[1006] == before, G(b).full - tscan)
+    W.time = W.time + 10; now = math.floor(W.time)
+    inject("H1,510006," .. (now + 299) .. ",3,1"); inject("D510006,1,1E11E11E1")
+    local n2 = 0; for _ in pairs(G(b).p) do n2 = n2 + 1 end
+    ok("item cap: a complete newer scan replaces the layer, items kept aside at the cap included", n2 == 3 and G(b).p[2] == 14 and G(b).p[3] == 14 and G(b).full == now + 299 and G(b).p[1006] == nil, n2)
     Yb.MAXITEMS = cap
-    G(b).p[1], G(b).q[1], G(b).t[1] = nil, nil, nil
+    local H2 = G(b); for k, v in pairs(copy(G0)) do H2[k] = v end   -- back to the earlier layer for the checks below
     -- the tooltip line names the guild member
     local lines = {}
     b.db.enabled = true
@@ -250,6 +254,91 @@ ok("not in a guild: nothing sent, clear message", #W.log == 0 and chat[#chat]:fi
 local sv = C_ChatInfo; C_ChatInfo = nil; local o1 = pcall(function() cur = a; return a.ns.sync.broadcast(true) end); C_ChatInfo = sv
 ok("client without addon messages: no error", o1)
 
+-- ---- review round 1 (B1, S1, S2, N6, N7): fresh own scan first, no lockout at the cap, provenance pruned
+do
+    local function to(c, msg, sender) fire(c, "CHAT_MSG_ADDON", "AHProfit", msg, "GUILD", sender or "Hostile-Realm", "", 0, 0, "", 0) end
+    local function send(c, sid, t, prices, sender)
+        cur = c
+        local ch, n = c.ns.sync.encode({ p = prices, q = {} })
+        to(c, "H1," .. sid .. "," .. t .. "," .. n .. "," .. #ch, sender)
+        for i, p in ipairs(ch) do to(c, "D" .. sid .. "," .. i .. "," .. p, sender) end
+    end
+    local function look3(c, id) cur = c; local p, _, _, src = c.ns.lookup(id); return tostring(p) .. " " .. tostring(src) end
+    local function count(t) local n = 0; for _ in pairs(t) do n = n + 1 end return n end
+    W.guild = false                                              -- nothing here may reach the other clients
+    -- S1: a fresh own scan wins whatever the feed's age and whatever a guild member claims
+    for _, case in ipairs({ { 60, 30, true }, { 60, 30, false }, { 1800, 600, true }, { 60, 120, true }, { 60, nil, true }, { 7200, nil, true }, { 7201, nil, true } }) do
+        local c = client("Probe" .. case[1] .. tostring(case[2]) .. tostring(case[3]))
+        local now = math.floor(W.time)
+        local Lc = L(c); Lc.p[3], Lc.q[3], Lc.t[3] = 77, 9, now - case[1]
+        if case[3] then Lc.full = now - case[1] end
+        if case[2] then c.ns.seed = { t = now - case[2], flat = { 3, 50, 5 } } end
+        cur = c; to(c, "H1,111111," .. (now + 300) .. ",2,2"); to(c, "D111111,1," .. c.ns.sync.encode({ p = { [3] = 14 }, q = { [3] = 1 } })[1])
+        local want = case[1] <= 7200 and "77 scan" or "14 guild"
+        ok("S1: own " .. case[1] .. "s, feed " .. tostring(case[2]) .. "s, full " .. tostring(case[3]) .. ", hostile +300 partial -> " .. want, look3(c, 3) == want, look3(c, 3))
+    end
+    -- B1: junk ids from unfinished transfers fill the 60,000 cap
+    local function fillCap(c, t)
+        for _, range in ipairs({ { 1, 49000 }, { 49001, 60000 } }) do
+            local prices = {}
+            for i = range[1], range[2] do prices[9000000 + i] = 1 end
+            cur = c
+            local ch, n = c.ns.sync.encode({ p = prices, q = {} })
+            to(c, "H1,123456," .. t .. "," .. (n + 1) .. "," .. (#ch + 1))       -- announces one item more: never completes
+            for i, p in ipairs(ch) do to(c, "D123456," .. i .. "," .. p) end
+        end
+    end
+    local function honest(c, sid, t, k)
+        local pr = {}
+        for i = 1, k do pr[i + 100] = 100 + i end
+        send(c, sid, t, pr, "Honest-Realm")
+        local got = 0
+        for i = 1, k do if G(c).p[i + 100] then got = got + 1 end end
+        return got
+    end
+    do
+        local c = client("ProbeCapNow")
+        local now = math.floor(W.time)
+        fillCap(c, now + 1)
+        ok("B1: the cap can be filled by unfinished transfers", count(G(c).p) == 60000 and G(c).full == 0, count(G(c).p))
+        W.time = W.time + 60
+        local got = honest(c, 777770, math.floor(W.time), 5000)
+        ok("B1: a complete honest scan within 12 h replaces the layer instead of being refused", got == 5000 and G(c).full == math.floor(W.time) and count(G(c).p) == 5000 and G(c).p[9000001] == nil, got .. " " .. count(G(c).p))
+        ok("B1: ...and its sender is shown", look3(c, 101) == "101 guild" and c.db.syncFrom == "Honest")
+    end
+    do
+        local c = client("ProbeCapWeek")
+        local now = math.floor(W.time)
+        fillCap(c, now + 1)
+        W.time = W.time + 7 * 86400
+        local got = honest(c, 777771, math.floor(W.time), 5000)
+        ok("B1: a week later (Mani's repro) every honest item is stored", got == 5000 and G(c).p[9000001] == nil, got)
+        -- older than 12 h: dropped at load and when a header is accepted
+        W.time = W.time + 43201
+        cur = c; to(c, "H1,777772," .. math.floor(W.time) .. ",9,9")
+        ok("B1: entries older than 12 h are dropped when a header is accepted", count(G(c).p) == 0 and next(G(c).from) == nil, count(G(c).p))
+        W.time = W.time - 43201 - 7 * 86400
+    end
+    -- S2 / Astra C4: provenance from unfinished transfers does not pile up
+    do
+        local c = client("ProbeFrom")
+        local now = math.floor(W.time)
+        for i = 1, 200 do cur = c; to(c, "H1,123456," .. (now - 201 + i) .. ",2,2"); to(c, "D123456,1,3E1") end
+        ok("S2: sender names of unfinished transfers do not pile up (at most the last two)", count(G(c).from) <= 2, count(G(c).from))
+        cur = c; to(c, "H1,123457," .. now .. ",2,2")
+        ok("S2: ...and the next accepted header keeps only the one in use", count(G(c).from) == 1, count(G(c).from))
+    end
+    -- N7: an empty or absurdly long sender name is refused, without an error
+    do
+        local c = client("ProbeName")
+        local now = math.floor(W.time)
+        local okNoName = pcall(send, c, 123450, now, { [3] = 14 }, "-Realm")
+        local okLong = pcall(send, c, 123451, now, { [5] = 14 }, string.rep("S", 100) .. "-Realm")
+        ok("N7: empty and over-long sender names are refused without an error", okNoName and okLong and G(c).p[3] == nil and G(c).p[5] == nil)
+    end
+    W.guild = true
+end
+
 -- ---- size of a real scan
 do
     local ns2 = {}
@@ -274,7 +363,7 @@ do
     end
     local _, db = boot({ live = { ["Realm|Alliance"] = { p = { [9] = 5 }, q = { [9] = 1 }, t = { [9] = 1 }, full = 0 } } })
     ok("old save: shared layer created, version set, own scans kept", db.v == 1 and type(db.shared) == "table" and db.live["Realm|Alliance"].p[9] == 5)
-    local c3, db3 = boot({ v = 1, shared = { ["Realm|Alliance"] = { p = { [7] = "x", [8] = 3 }, q = { [8] = 1 }, t = { [8] = 5 }, full = "no", from = 7 }, junk = 5 } })
+    local c3, db3 = boot({ v = 1, shared = { ["Realm|Alliance"] = { p = { [7] = "x", [8] = 3 }, q = { [8] = 1 }, t = { [8] = math.floor(W.time) }, full = "no", from = 7 }, junk = 5 } })
     local H3 = db3.shared["Realm|Alliance"]
     ok("malformed shared layer repaired at load", H3 and H3.full == 0 and H3.p[7] == nil and H3.p[8] == 3 and type(H3.from) == "table", H3 and tostring(H3.full))
     local many = { v = 1, shared = {} }
@@ -284,6 +373,20 @@ do
     ok("at most 8 auction houses kept, the most recent ones", n4 == 8 and db4.shared["Realm12|Alliance"] and not db4.shared["Realm1|Alliance"], n4)
     local _, db5 = boot({ v = 2, shared = { x = 1 } })
     ok("a save from a newer version is left alone", db5.v == 2 and db5.shared.x == 1)
+    -- S2 / B1 at load: prices older than 12 h and sender names no stored price uses are dropped
+    local nowL = math.floor(W.time)
+    local _, db6 = boot({ v = 1, shared = { ["Realm|Alliance"] = { p = { [1] = 5, [2] = 6 }, q = { [1] = 1, [2] = 1 }, t = { [1] = nowL - 43201, [2] = nowL - 60 }, full = nowL - 43201,
+        from = { [nowL - 43201] = "Old", [nowL - 60] = "Recent", [nowL - 30] = "Unused" } } } })
+    local H6 = db6.shared and db6.shared["Realm|Alliance"]
+    ok("load: shared prices older than 12 h dropped, recent kept", H6 and H6.p[1] == nil and H6.p[2] == 6, H6 and tostring(H6.p[1]))
+    ok("load: only sender names of stored prices are kept", H6 and H6.from[nowL - 60] == "Recent" and H6.from[nowL - 43201] == nil and H6.from[nowL - 30] == nil)
+    -- N6: with a save from a newer version, received prices are neither stored nor shown
+    local c7, db7 = boot({ v = 9, shared = { x = 1 } })
+    local tN = math.floor(W.time)
+    c7.ns.sync.receive("AHProfit", "H1,424242," .. tN .. ",1,1", "GUILD", "Guildmate-Realm")
+    c7.ns.sync.receive("AHProfit", "D424242,1,3E1", "GUILD", "Guildmate-Realm")
+    cur = c7
+    ok("N6: a newer save: received prices are not shown and its data is untouched", c7.ns.lookup(3) == nil and db7.shared.x == 1 and db7.v == 9)
 end
 print(pass .. " passed, " .. fail .. " failed")
 os.exit(fail == 0 and 0 or 1)

@@ -203,17 +203,15 @@ local function mine(sender)
     return sn == n and (sr == "" or not r or r == "" or sr:gsub("[%s%-]", "") == r:gsub("[%s%-]", ""))
 end
 local function header(sender, ver, sid, t, n, chunks)
-    if ver ~= VER then return end
+    if ver ~= VER or not ns.sharedOK() then return end          -- a save from a newer version: nothing received
     local now = ns.now()
     if not (whole(t, now + AHEAD) and t >= now - BEHIND and whole(n, 50000) and n > 0 and whole(chunks, 2000) and chunks > 0 and chunks <= n) then return end
     local L, H = ns.live(), ns.shared()
     if pending and t >= L.full then pending = nil end           -- someone else is already answering the request
     for k, r in pairs(R) do if now - r.at > 900 then R[k] = nil end end
     if t <= math.max(L.full, H.full) then return end            -- nothing newer than what is here
-    local c = 0
-    for _ in pairs(H.p) do c = c + 1 end
-    held[H] = c
-    R[sender] = { sid = sid, t = t, n = n, chunks = chunks, got = {}, count = 0, items = 0, seen = {}, at = now }
+    held[H] = ns.pruneShared(H)                                  -- also drops entries older than 12 h
+    R[sender] = { sid = sid, t = t, n = n, chunks = chunks, got = {}, count = 0, items = 0, seen = {}, at = now, stage = {} }
 end
 local function chunk(sender, sid, seq, payload)
     local r = R[sender]
@@ -228,7 +226,9 @@ local function chunk(sender, sid, seq, payload)
     for i = 1, #list, 3 do
         local id = list[i]
         if not seen[id] then seen[id] = true; r.items = r.items + 1 end
-        if H.p[id] == nil and n >= Y.MAXITEMS then r.capped = true
+        if H.p[id] == nil and n >= Y.MAXITEMS then             -- full: kept aside until the scan is complete
+            local st = r.stage
+            st[#st + 1] = id; st[#st + 1] = list[i + 1]; st[#st + 1] = list[i + 2]
         elseif (H.t[id] or 0) < t then
             if H.p[id] == nil then n = n + 1 end
             H.p[id], H.q[id], H.t[id] = list[i + 1], list[i + 2], t
@@ -237,11 +237,22 @@ local function chunk(sender, sid, seq, payload)
     held[H] = n
     if r.count < r.chunks then return end
     R[sender] = nil
-    if r.items ~= r.n or r.capped then return end                -- incomplete: keep what arrived, forget nothing
-    for id, it in pairs(H.t) do                                  -- shared layer only; your own scans are never touched
+    if r.items ~= r.n then return end                            -- incomplete: keep what arrived, forget nothing
+    -- Complete and newer than the layer: it replaces the older entries (shared layer only; your own scans are never
+    -- touched), so junk from unfinished transfers cannot hold the cap. Items kept aside at the cap go in now.
+    for id, it in pairs(H.t) do
         if it < t and not seen[id] then H.p[id], H.q[id], H.t[id] = nil, nil, nil; held[H] = held[H] - 1 end
     end
-    if t > H.full then H.full = t end
+    local st, complete = r.stage, true
+    for i = 1, #st, 3 do
+        local id = st[i]
+        if H.p[id] == nil and held[H] >= Y.MAXITEMS then complete = false
+        elseif (H.t[id] or 0) < t then
+            if H.p[id] == nil then held[H] = held[H] + 1 end
+            H.p[id], H.q[id], H.t[id] = st[i + 1], st[i + 2], t
+        end
+    end
+    if complete and t > H.full then H.full = t end
     local used = {}
     for _, it in pairs(H.t) do used[it] = true end
     for k in pairs(H.from) do if not used[k] then H.from[k] = nil end end
@@ -264,6 +275,8 @@ function Y.receive(prefix, text, channel, sender)
     if secret(prefix) or secret(text) or secret(channel) or secret(sender) then return end
     if prefix ~= PFX or channel ~= "GUILD" or type(text) ~= "string" or type(sender) ~= "string" or #text > 255 then return end
     if not ns.db() or not on() or mine(sender) then return end
+    local who = sender:match("^([^-]+)")
+    if not who or #who > 64 then return end                     -- no usable sender name
     local k = text:sub(1, 1)
     if k == "D" then
         local sid, seq, payload = text:match("^D(%d%d%d%d%d%d),(%d%d?%d?%d?),([%w+/]+)$")

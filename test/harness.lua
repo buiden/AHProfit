@@ -65,9 +65,12 @@ function IsShiftKeyDown() return true end
 l = tip(id1); ok("stack line with Shift", #l >= 4 and has(l, "Your 20 on the AH, after cut => 1g 14s 0c"), table.concat(l, " / ")); S.count[id1] = 0
 IsShiftKeyDown = nil
 
--- feed fallback, newer feed beats older scan
-AHProfitDB.live["TestRealm|Alliance"].t[id1] = ns.seed.t - 10
+-- feed fallback, newer feed beats older scan (one over 2 hours old: a scan under 2 hours wins whatever the feed)
+AHProfitDB.live["TestRealm|Alliance"].t[id1] = ns.seed.t - 7300
 l = tip(id1); ok("newer feed beats older scan", has(l, "AH price  feed 10m ago"), table.concat(l, " / "))
+AHProfitDB.live["TestRealm|Alliance"].t[id1] = ns.seed.t - 10
+l = tip(id1); ok("a scan under 2 hours old beats a newer feed", has(l, "AH price  scan 10m ago"), table.concat(l, " / "))
+AHProfitDB.live["TestRealm|Alliance"].t[id1] = ns.seed.t - 7300
 -- binding / unknown / uncached / no vendor value
 items[900001] = { 100, 1, 2 }; ok("bind on pickup hidden", #tip(900001) == 0)
 items[900002] = { 100, 4, 1 }; ok("quest item hidden", #tip(900002) == 0)

@@ -45,8 +45,9 @@ ns.live = live
 
 -- Prices received from guild members (Sync.lua) live in their own layer, one per auction house: they never change
 -- or delete your own scans. DB.v 1 introduced it; from = { [scan time] = sender name }. A save written by a newer
--- version (DB.v > 1) is left untouched and this version then ignores the shared layer.
-local SHARED_V, MAX_HOUSES = 1, 8
+-- version (DB.v > 1) is left untouched, and this version then neither stores nor shows received prices
+-- (ns.sharedOK() is false; Sync.lua refuses them). Received prices older than 12 hours are dropped.
+local SHARED_V, MAX_HOUSES, SHARED_KEEP = 1, 8, 43200
 local spare = { p = {}, q = {}, t = {}, full = 0, from = {} }
 local function shared()
     if DB.v ~= SHARED_V then return spare end
@@ -56,7 +57,20 @@ local function shared()
     return H
 end
 ns.shared = shared
+ns.sharedOK = function() return DB ~= nil and DB.v == SHARED_V end
 local function okNum(v, max) return type(v) == "number" and v >= 0 and v <= max and v == math.floor(v) end
+-- Drops received prices older than 12 hours and sender names no stored price uses. Returns the item count.
+local function pruneShared(H)
+    local oldest, used, n = now() - SHARED_KEEP, {}, 0
+    for id, t in pairs(H.t) do
+        if t < oldest then H.p[id], H.q[id], H.t[id] = nil, nil, nil
+        else used[t] = true; n = n + 1 end
+    end
+    for t in pairs(H.from) do if not used[t] then H.from[t] = nil end end
+    if H.full < oldest then H.full = 0 end
+    return n
+end
+ns.pruneShared = pruneShared
 -- Checks the saved shared layer at load: wrong types are dropped, at most MAX_HOUSES houses (the newest kept).
 local function loadShared()
     if type(DB.v) == "number" and DB.v > SHARED_V then return end
@@ -74,7 +88,8 @@ local function loadShared()
             end
             for id in pairs(H.t) do if H.p[id] == nil then H.t[id], H.q[id] = nil, nil end end
             for id in pairs(H.q) do if H.p[id] == nil then H.q[id] = nil end end
-            for t, n in pairs(H.from) do if not (okNum(t, 1e10) and type(n) == "string" and #n <= 64) then H.from[t] = nil end end
+            for t, n in pairs(H.from) do if not (okNum(t, 1e10) and type(n) == "string" and n ~= "" and #n <= 64) then H.from[t] = nil end end
+            pruneShared(H)
             keys[#keys + 1] = k
         end
     end
@@ -99,18 +114,19 @@ local function seedLookup(id)
 end
 
 -- Returns price per unit (copper), quantity listed, time seen, source ("scan", "guild" or "feed") and, for "guild",
--- the sender's name. Order: your own scan when it is at most 2 hours old, then a guild member's scan newer than
--- yours, then your older scan, then the bundled feed. A scan older than the feed loses to the feed.
+-- the sender's name. Order: your own scan when it is at most 2 hours old (always, whatever the feed's age or a
+-- guild member's claim), then a guild member's scan newer than yours, then your older scan, then the bundled feed.
+-- A scan older than the feed loses to the feed.
 local OWN_FRESH = 7200
 local function lookup(id)
     local L, H = live(), shared()
     local lp, lt = L.p[id], L.t[id]
+    if lp and now() - lt <= OWN_FRESH then return lp, L.q[id], lt, "scan" end
     local gp, gt = H.p[id], H.t[id]
     local sp, sq, st = seedLookup(id)
     if sp and math.max(L.full, H.full) >= st then sp = nil end   -- a complete scan newer than the snapshot is the whole truth
     if sp and lp and lt < st then lp = nil end
     if sp and gp and gt < st then gp = nil end
-    if lp and now() - lt <= OWN_FRESH then return lp, L.q[id], lt, "scan" end
     if gp and (not lp or gt > lt) then return gp, H.q[id], gt, "guild", H.from[gt] end
     if lp then return lp, L.q[id], lt, "scan" end
     if sp then return sp, sq, st, "feed" end
