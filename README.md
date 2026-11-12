@@ -44,8 +44,19 @@ Auctionator fixes its day when it loads, so after midnight its new scans are not
 | `/ahp share` | Send your scanned prices to the guild now |
 | `/ahp on` / `off` | Tooltip lines |
 | `/ahp cut 5`, `/ahp cut 15` | The auction house cut in percent |
+| `/ahp keep <item>`, `/ahp unkeep <item>` | Never (or again) suggest this item when the bags are full |
+| `/ahp bagfull <0-20>`, `/ahp bagfull off` | Warn when this many general bag slots are left (default 0) |
 
-The addon never buys, sells, lists or moves anything.
+**Bags full:** when your bags are full (the game's "Inventory is full", or no free slot left), a small window says
+what to do: first a free fix (merge two partial stacks), otherwise the least valuable slot to destroy, in a bag the
+item can go into (herb, mining and other special bags only count for their own items). A slot's value is its count
+times the vendor price, or the auction price after the cut when that is higher and the item is not bound; grey items
+come first, unknown values last. Quest items, quest starters, the hearthstone, keys, tools, your class reagents,
+food and potions (unless grey), equipment-set items, bound items without a vendor price and your keep list are never
+suggested. With the loot window open it compares the drop with that slot ("Drop is worth 45s, your cheapest slot is
+2s"). **Show** opens your bags and marks the slot, **Keep** adds the item to the keep list. It only advises.
+
+The addon never buys, sells, lists or moves anything, and never destroys an item.
 
 It also keeps, in its saved variables, records for tools outside the game (the Relax Coach Farming page reads them):
 
@@ -74,7 +85,7 @@ It also keeps, in its saved variables, records for tools outside the game (the R
 Lua 5.1, from the repository root:
 
 ```sh
-for t in harness ui_test sync_test extra_test ledger_test; do lua5.1 test/$t.lua; done
+for t in harness ui_test sync_test extra_test ledger_test bagfull_test; do lua5.1 test/$t.lua; done
 ```
 
 ## License

@@ -15,4 +15,5 @@ Sync.lua
 Farm.lua
 Tools.lua
 Extra.lua
+Bags.lua
 UI.lua
