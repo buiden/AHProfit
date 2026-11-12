@@ -37,7 +37,7 @@ local function price(i)
     if lookup then
         local ok, p, q, t = pcall(lookup, it[2])
         if ok and type(p) == "number" and p > 0 and type(t) == "number" and t > T then
-            return p, type(q) == "number" and q or 0, true
+            return p, type(q) == "number" and q or nil, true   -- nil: listed count not known (Auctionator)
         end
     end
     return it[3], it[4], it[6] == 1
@@ -179,7 +179,7 @@ function F.drops(list, CUT)
         local p, n = price(list[k])
         if q * each > 0 then
             out[#out + 1] = { i = #out + 1, name = it[1], id = it[2], q = q, each = each, v = q * each,
-                vendor = it[5] > 0 and it[5] >= p * CUT, listed = n, thin = p > 0 and n < 150 and p * CUT > it[5] }
+                vendor = it[5] > 0 and it[5] >= p * CUT, listed = n, thin = p > 0 and n ~= nil and n < 150 and p * CUT > it[5] }
         end
     end
     table.sort(out, function(x, y) if x.v ~= y.v then return x.v > y.v end return x.i < y.i end)

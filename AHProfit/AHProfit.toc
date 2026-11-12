@@ -4,6 +4,7 @@
 ## Author: Abdullah
 ## Version: 0.5.3
 ## SavedVariables: AHProfitDB
+## OptionalDeps: Auctionator
 ## IconTexture: Interface\Icons\INV_Misc_Coin_01
 
 Data.lua

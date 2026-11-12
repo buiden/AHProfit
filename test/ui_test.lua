@@ -248,6 +248,18 @@ do
     -- a scan older than the farm data does not override it
     L.t[ore[2]] = T - 60
     ok("an older scan leaves the ranking alone", snap() == base)
+    -- a price from Auctionator (seen today, after the farm data) has no listed count: never "only 0 listed"
+    do
+        local t0, rt = W.time, time
+        W.time = T + 2 * 86400
+        time = function(x) if type(x) == "table" then return 1577836800 end return W.time end
+        Auctionator = { API = { v1 = { GetAuctionAgeByItemID = function(_, id) return id == ore[2] and 0 or nil end,
+            GetAuctionPriceByItemID = function(_, id) return id == ore[2] and 4000 or nil end } } }
+        local da = F.drops({ nd[6][1], 1 }, CUT)
+        ok("drops: an Auctionator price is used, with no listed count and not called thin", da[1] and da[1].each == math.max(4000 * CUT, ore[5])
+            and da[1].listed == nil and da[1].thin == false, da[1] and tostring(da[1].listed) .. " " .. tostring(da[1].thin))
+        Auctionator, time, W.time = nil, rt, t0
+    end
     -- crafting: a scanned bar price moves the craft's numbers
     local cr = F.crafts(S, CUT)[1]
     L.p[cr.id], L.q[cr.id], L.t[cr.id] = 90000000, 3, T + 60
@@ -343,6 +355,14 @@ do
     ok("setup rows hidden on a tool tab", not U.boxes.lvMin:IsShown() and not U.checks.mining:IsShown() and U.intro:GetText() ~= "")
     ok("no map buttons on a tool tab", not U.mapBtn:IsShown() and not U.graph:IsShown() and not U.sessBtn:IsShown())
     ok("detail explains the row", plain(U.detail:GetText()):find("Auction instead of vendor: +7s 0c for your 10", 1, true) and plain(U.detail:GetText()):find("Deposit not measured yet", 1, true), plain(U.detail:GetText()))
+    do  -- a price with no listed count (Auctionator) does not claim "0 listed"
+        local real = n2.lookup
+        n2.lookup = function(id) local p, q, t, s, f = real(id); if id == 900001 and p then return p, nil, W.time, "auctionator" end return p, q, t, s, f end
+        U:Refresh()
+        local d = plain(U.detail:GetText())
+        ok("bags detail: an Auctionator price is named and has no listed count", d:find("AH lowest (Auctionator, today): ", 1, true) and not d:find("each, ", 1, true) and not d:find("0 listed", 1, true), (d:gsub("\n", " | ")))
+        n2.lookup = real; U:Refresh()
+    end
 
     -- ---- deposits are read from the game once the auction house is open
     fire("AUCTION_HOUSE_SHOW")

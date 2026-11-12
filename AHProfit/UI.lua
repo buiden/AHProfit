@@ -199,7 +199,7 @@ local function bagRows(out, rows, C, where)
             detail = function()
                 local L = { "|cffffd100" .. r.name .. "|r  " .. (ah and ("auction " .. r.free .. (r.bound > 0 and (", vendor the " .. r.bound .. " soulbound") or "")) or ("vendor all " .. r.n)) }
                 if r.price then
-                    L[#L + 1] = "AH lowest (" .. ns.srcLabel(r.src, r.t, r.from) .. "): " .. coin(r.price) .. " each, " .. (r.qty or 0) .. " listed"
+                    L[#L + 1] = "AH lowest (" .. ns.srcLabel(r.src, r.t, r.from) .. "): " .. coin(r.price) .. " each" .. (r.qty and (", " .. r.qty .. " listed") or "")
                     L[#L + 1] = "After " .. C .. "% cut: " .. coin(r.net) .. " each. A vendor pays " .. coin(r.vendor) .. " each."
                 else
                     L[#L + 1] = "No auction listings seen. A vendor pays " .. coin(r.vendor) .. " each."

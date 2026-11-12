@@ -425,6 +425,83 @@ do
     S.time = T0
 end
 
+-- ---- Auctionator as an optional price source (mocked Auctionator.API.v1)
+do
+    local function boot(saved) AHProfitDB = saved; ns = {}; load("Data.lua"); load("Core.lua"); fire("ADDON_LOADED", "AHProfit"); AHProfitDB.autoscan = false; timers = {}; return AHProfitDB end
+    local realTime = time
+    issecretvalue = function(v) return S.secret ~= nil and S.secret[v] == true end
+    time = function(t) if type(t) == "table" then return 1577836800 - 4 * 3600 end return S.time end   -- local midnight = 20:00 UTC
+    local A = { age = {}, price = {}, calls = 0, ids = {} }
+    local function api()
+        Auctionator = { API = { v1 = {
+            GetAuctionAgeByItemID = function(caller, id) A.calls = A.calls + 1; A.ids[#A.ids + 1] = caller; if A.boom then error("broken") end return A.age[id] end,
+            GetAuctionPriceByItemID = function(caller, id) A.ids[#A.ids + 1] = caller; return A.price[id] end } } }
+    end
+    local fid, fp = ns.seed.flat[1], ns.seed.flat[2]
+    Auctionator = nil
+    boot({})
+    local p, q, t, src = ns.lookup(fid)
+    ok("auctionator: without it, the feed as before", p == fp and src == "feed")
+    api(); A.age[fid], A.price[fid] = 0, fp + 7
+    boot({})
+    p, q, t, src = ns.lookup(fid)
+    local dayStart = S.time - (S.time - (1577836800 - 4 * 3600)) % 86400
+    ok("auctionator: a price seen today fills in when there is no scan of yours or the guild's", p == fp + 7 and q == nil and src == "auctionator"
+        and t == dayStart and t <= S.time and S.time - t < 86400, tostring(src) .. " " .. tostring(t) .. " " .. dayStart)
+    ok("auctionator: called with the addon's name", A.ids[1] == "AHProfit" and A.ids[2] == "AHProfit")
+    local lines = tip(fid)
+    ok("auctionator: the tooltip says where the price is from, without a listed count", has(lines, "Auctionator, today") and not has(lines, "listed"), table.concat(lines, " | "))
+    A.calls = 0; ns.lookup(fid); ns.lookup(fid)
+    ok("auctionator: answers are kept for a minute", A.calls == 0)
+    S.time = S.time + 61; ns.lookup(fid)
+    ok("auctionator: ...and asked again after it", A.calls == 1)
+    A.age[fid] = 1; S.time = S.time + 61
+    p, _, _, src = ns.lookup(fid)
+    ok("auctionator: a price seen yesterday is not used", src == "feed" and p == fp)
+    A.age[fid] = 0; S.time = S.time + 61
+    local L, H = ns.live(), ns.shared()
+    L.p[fid], L.q[fid], L.t[fid] = 300, 4, S.time - 3600
+    A.calls = 0
+    p, q, _, src = ns.lookup(fid)
+    ok("auctionator: your scan up to 2 hours old wins, Auctionator not asked", p == 300 and src == "scan" and A.calls == 0)
+    L.t[fid] = S.time - 20 * 3600
+    p, _, _, src = ns.lookup(fid)
+    ok("auctionator: your scan up to 24 hours old still wins", p == 300 and src == "scan" and A.calls == 0, src)
+    L.t[fid] = S.time - 25 * 3600
+    p, _, _, src = ns.lookup(fid)
+    ok("auctionator: your scan over 24 hours old gives way to today's Auctionator price", p == fp + 7 and src == "auctionator", src)
+    H.p[fid], H.q[fid], H.t[fid], H.from[S.time - 5 * 3600] = 280, 2, S.time - 5 * 3600, "Ahmed"
+    p, _, _, src = ns.lookup(fid)
+    ok("auctionator: a guild price under 24 hours old wins", p == 280 and src == "guild", src)
+    H.p[fid], H.q[fid], H.t[fid] = nil, nil, nil
+    L.p[fid], L.q[fid], L.t[fid] = nil, nil, nil
+    -- broken or odd answers are ignored
+    local function fresh() S.time = S.time + 61 end
+    for _, case in ipairs({ { "an error", function() A.boom = true end }, { "a zero price", function() A.price[fid] = 0 end },
+        { "a fractional price", function() A.price[fid] = 1.5 end }, { "a text price", function() A.price[fid] = "100" end },
+        { "a text age", function() A.age[fid] = "0" end }, { "a secret price", function() A.price[fid] = 4242; S.secret = { [4242] = true } end },
+        { "no price", function() A.price[fid] = nil end } }) do
+        A.boom, A.age[fid], A.price[fid], S.secret = false, 0, fp + 7, nil
+        case[2](); fresh()
+        p, _, _, src = ns.lookup(fid)
+        ok("auctionator: " .. case[1] .. " is ignored", src == "feed" and p == fp, tostring(src))
+    end
+    A.boom, A.age[fid], A.price[fid], S.secret = false, 0, fp + 7, nil
+    -- the setting
+    fresh(); SlashCmdList.AHPROFIT("auctionator off")
+    p, _, _, src = ns.lookup(fid)
+    ok("auctionator: /ahp auctionator off stops it and is saved", src == "feed" and AHProfitDB.useAuctionator == false)
+    boot(AHProfitDB); fresh()
+    ok("auctionator: ...and stays off after a reload", select(4, ns.lookup(fid)) == "feed")
+    SlashCmdList.AHPROFIT("auctionator on"); fresh()
+    ok("auctionator: /ahp auctionator on brings it back", select(4, ns.lookup(fid)) == "auctionator" and AHProfitDB.useAuctionator == true)
+    -- a partial API (an older or newer Auctionator) is left alone
+    Auctionator = { API = { v1 = { GetAuctionAgeByItemID = function() return 0 end } } }; fresh()
+    ok("auctionator: without both API functions nothing is asked", select(4, ns.lookup(fid)) == "feed")
+    Auctionator = nil
+    time, issecretvalue = realTime, nil
+end
+
 -- ---- saved history checked at load
 do
     local function boot(saved)

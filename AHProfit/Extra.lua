@@ -327,7 +327,7 @@ local function calc(rid, r, C)
     if net > 0 and net >= (type(vendor) == "number" and vendor or 0) then each, how = net, "ah"
     elseif type(vendor) == "number" and vendor > 0 then each, how = vendor, "vendor" end
     local row = { rid = rid, name = r.n, prof = r.prof, out = r.out, makes = makes, lo = r.lo, hi = r.hi, each = each, how = how, value = each * makes,
-        price = price, listed = qty or 0, t = t, src = src, from = from, mats = {}, cost = 0, raw = 0, known = true }
+        price = price, listed = qty or 0, qtyKnown = qty ~= nil, t = t, src = src, from = from, mats = {}, cost = 0, raw = 0, known = true }
     for k = 1, #r.mats, 2 do
         local id, q = r.mats[k], r.mats[k + 1]
         local c, from = unitCost(id)
@@ -372,7 +372,7 @@ function X.profText(rid, C)
     local makes = r.lo == r.hi and ("x" .. r.lo) or ("x" .. r.lo .. "-" .. r.hi)
     local a = "|cffffd100AH Profit|r  " .. r.name .. " " .. makes .. ": "
     if not r.how then return a .. "no auction listing and no vendor value for what it makes." end
-    a = a .. "sells for " .. ns.money(math.floor(r.value + 0.5)) .. (r.how == "ah" and (" on the AH after the " .. C .. "% cut (" .. r.listed .. " listed, " .. ns.srcLabel(r.src, r.t, r.from) .. ")") or " at a vendor")
+    a = a .. "sells for " .. ns.money(math.floor(r.value + 0.5)) .. (r.how == "ah" and (" on the AH after the " .. C .. "% cut (" .. (r.qtyKnown and (r.listed .. " listed, ") or "") .. ns.srcLabel(r.src, r.t, r.from) .. ")") or " at a vendor")
     local b
     if r.profit then
         b = "Materials " .. ns.money(math.floor(r.cost + 0.5)) .. ".  Profit " .. (r.profit >= 0 and "|cff40ff40" or "|cffff5050") .. signed(r.profit) .. "|r"
