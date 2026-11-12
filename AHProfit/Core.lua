@@ -264,6 +264,10 @@ end
 local sweepLeft, canWait = 0, false -- decodes the sweep may still spend in this batch; whether a row may wait
 local function histAdd(H, id, p, q, day)
     if not (okNum(p, 1e12) and p >= 1 and okNum(q, 1e9) and okNum(day, 1e5)) then return end   -- a bad row takes no place
+    -- A row may be older than the newest day already stored (seen before midnight, written after; or the clock
+    -- stepped back): the string is read as of the later of the row's day and today, and the row goes in day order.
+    local asOf = math.max(day, scanDay(now()))
+    if day <= asOf - HIST_DAYS then return end                   -- already older than what is kept
     local days
     if H[id] == nil then
         if histCount[H] >= ns.HIST_ITEMS then
@@ -283,17 +287,23 @@ local function histAdd(H, id, p, q, day)
         days = {}
         histCount[H] = histCount[H] + 1
     else
-        days = histDecode(H[id], day) or {}                     -- a damaged string starts over
+        days = histDecode(H[id], asOf)
+        if not days then
+            if histDecode(H[id], 1e5) then return end            -- it has a day after that: kept as it is, row not placed
+            days = {}                                            -- damaged: starts over
+        end
     end
-    local last = days[#days]
-    if last and last[1] == day then
-        local hi = last[2] > p and last[2] or p
-        local lo = last[3] > 0 and last[3] or last[2]
+    local i = #days
+    while i > 0 and days[i][1] > day do i = i - 1 end
+    local e = days[i]
+    if e and e[1] == day then                                    -- the same day: highest low, lowest low, most listed
+        local hi = e[2] > p and e[2] or p
+        local lo = e[3] > 0 and e[3] or e[2]
         lo = lo < p and lo or p
-        last[2], last[3] = hi, lo < hi and lo or 0
-        if q > last[4] then last[4] = q end
+        e[2], e[3] = hi, lo < hi and lo or 0
+        if q > e[4] then e[4] = q end
     else
-        days[#days + 1] = { day, p, 0, q }
+        table.insert(days, i + 1, { day, p, 0, q })
     end
     H[id] = histEncode(days)
     histVersion = histVersion + 1
