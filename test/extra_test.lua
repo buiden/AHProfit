@@ -197,6 +197,12 @@ do
     for _, x in ipairs(X2.deals()) do if x.id == 104 then d104 = x end end
     ok("deals: ...and its new usual price is used", d104 and d104.usual == 201, d104 and d104.usual)
     a.ns.histOwn = real
+    -- the list handed out is a copy: changing it does not change the next answer
+    local u1 = X2.usualPrices and X2.usualPrices() or {}
+    for _, u in ipairs(u1) do u.med = 1e9 end
+    local d104b
+    for _, x in ipairs(X2.deals()) do if x.id == 104 then d104b = x end end
+    ok("deals: the usual prices handed out are a copy", d104b and d104b.usual == 201, d104b and d104b.usual)
     Hh[104], Hh[2770], IT[104] = nil, nil, nil
     if a.ns.histChanged then a.ns.histChanged() end
     price(a, 2770, 75, 500)

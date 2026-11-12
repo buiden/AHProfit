@@ -176,8 +176,14 @@ local function bundledUsual(idx)
     end
     return e
 end
+-- A copy is handed out, so a caller changing it cannot change the next answer.
+local function copyList(list)
+    local out = {}
+    for i, u in ipairs(list) do out[i] = { id = u.id, name = u.name, med = u.med, days = u.days, own = u.own } end
+    return out
+end
 function X.usualPrices()
-    if usual.key == usualKey() then return usual.list end
+    if usual.key == usualKey() then return copyList(usual.list) end
     local list, cands, done = {}, {}, {}
     local H = ns.histHouse and ns.histHouse()
     local today = ns.scanDay and ns.scanDay(ns.now()) or 0
@@ -199,7 +205,7 @@ function X.usualPrices()
         end
     end
     usual.key, usual.list = usualKey(), list                     -- after the reads above (they may drop expired items)
-    return list
+    return copyList(list)
 end
 function X.deals()
     local D, out = db(), {}

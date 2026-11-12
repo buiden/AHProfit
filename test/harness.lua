@@ -309,6 +309,72 @@ do
     ok("history: logout frees expired items, at most 1,000 looked at", nHist() == 2000, nHist())
 end
 
+-- ---- review round 3 (PR-B): at the cap rows wait for the sweep; a future-dated string is kept; rows checked
+do
+    local T0 = S.time
+    local function boot(saved) AHProfitDB = saved; ns = {}; load("Data.lua"); load("Core.lua"); fire("ADDON_LOADED", "AHProfit"); AHProfitDB.autoscan = false; timers = {}; return AHProfitDB end
+    local key = "TestRealm|Alliance"
+    local function nHist() local n = 0; for _ in pairs((AHProfitDB.hist or {})[key] or {}) do n = n + 1 end return n end
+    local function fullScan(n, base, price)
+        fire("AUCTION_HOUSE_SHOW"); timers = {}
+        S.pages = { {} }; for i = 1, n do S.pages[1][i] = R(base + i, price + i, 1) end
+        SlashCmdList.AHPROFIT("scan"); fire("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
+    end
+    local function drain() local f = 0; while #timers > 0 and f < 2000 do runTimers(); f = f + 1 end return f end
+    -- the reviewer's case: 10,000 scanned, 21 days pass, 5,000 rescanned, 1,000 new
+    boot({})
+    fullScan(10000, 100000, 100); drain(); fire("AUCTION_HOUSE_CLOSED")
+    S.time = S.time + 21 * 86400
+    fullScan(5000, 100000, 200); drain(); fire("AUCTION_HOUSE_CLOSED")
+    fullScan(1000, 200000, 300); local frames = drain(); fire("AUCTION_HOUSE_CLOSED")
+    local H = AHProfitDB.hist[key]
+    local got, live = 0, 0
+    for id = 200001, 201000 do if H[id] then got = got + 1 end end
+    for id = 100001, 105000 do if H[id] then live = live + 1 end end
+    ok("history cap: after 21 days, 1,000 new items all find a place freed by expired ones", got == 1000 and live == 5000 and nHist() <= 10000 and frames < 2000, got .. " " .. live .. " " .. nHist())
+    -- a house that is really full (every item recent): the new row is dropped and the queue ends
+    boot({})
+    fullScan(10000, 100000, 100); drain(); fire("AUCTION_HOUSE_CLOSED")
+    fullScan(1, 300000, 100); frames = drain(); fire("AUCTION_HOUSE_CLOSED")
+    ok("history cap: a house full of recent items drops the new row and stops", #ns.histOwn(300001) == 0 and nHist() == 10000 and #timers == 0 and frames < 200, frames)
+    -- one expired item among 9,999 recent ones: a single new item gets its place in the same scan
+    do
+        local today0 = ns.scanDay(S.time)
+        local t = {}
+        for i = 1, 10000 do t[100000 + i] = ns.histEncode({ { i == 10000 and today0 - 30 or today0, 5, 0, 1 } }) end
+        boot({ v = 2, hist = { [key] = t } })
+        fullScan(1, 600000, 100); frames = drain(); fire("AUCTION_HOUSE_CLOSED")
+        ok("history cap: the one expired item among 9,999 gives its place in the same scan", #ns.histOwn(600001) == 1 and AHProfitDB.hist[key][110000] == nil and nHist() == 10000, frames)
+    end
+    S.time = T0
+    -- a string dated after today (the server clock went back) is unreadable for now, never deleted
+    boot({})
+    local today = ns.scanDay(S.time)
+    local Hf = ns.histHouse()
+    Hf[42] = ns.histEncode({ { today - 2, 5, 0, 1 }, { today + 1, 6, 0, 1 } })
+    local saved = Hf[42]
+    local r1 = ns.histOwn(42)
+    fire("PLAYER_LOGOUT")                                        -- the logout sweep looks at it too
+    ok("history: a string dated after today reads as nothing but stays on disk", #r1 == 0 and Hf[42] == saved)
+    S.time = S.time + 86400
+    local r2 = ns.histOwn(42)
+    ok("history: ...and reads again once the clock is past it", #r2 == 2, #r2)
+    S.time = T0
+    -- a queued row with a bad field takes no place
+    boot({})
+    local cap = ns.HIST_ITEMS
+    ns.HIST_ITEMS = 1000
+    local function up(f, name) for i = 1, 200 do local k, v = debug.getupvalue(f, i); if k == nil then break end; if k == name then return v end end end
+    local stepF = up(ns.histFinish, "histStep") or up(up(ns.histFinish, "flushHist") or function() end, "histStep")
+    fullScan(1000, 400000, 100)                                  -- 400 written, 600 waiting
+    local q, qh = up(stepF, "queue"), up(stepF, "qh") or up(stepF, "qi")
+    if q and qh and q[qh + 10] then q[qh + 10][2] = nil end      -- one waiting row loses its price
+    drain(); fire("AUCTION_HOUSE_CLOSED")
+    fullScan(1, 500000, 100); drain(); fire("AUCTION_HOUSE_CLOSED")
+    ok("history: a row with a bad field takes no place in the cap", nHist() == 1000 and #ns.histOwn(500001) == 1, nHist())
+    ns.HIST_ITEMS = cap
+end
+
 -- ---- saved history checked at load
 do
     local function boot(saved)

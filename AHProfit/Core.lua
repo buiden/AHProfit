@@ -219,31 +219,62 @@ local function histHouseOf(k)
 end
 local function histHouse() return histHouseOf(houseKey()) end
 ns.histHouse = histHouse
--- Items whose recorded days have all expired (or whose string is damaged) give their place back. This looks at up
--- to max items per call, continuing where the last call stopped; it returns how many it looked at.
+-- Whether a stored string may be dropped: damaged, or every recorded day expired. A string with a day after today
+-- (the server clock went back) is unreadable for now but kept: it reads again once the clock is past that day.
+local function histDroppable(e, today)
+    local d = histDecode(e, today)
+    if d then return #d == 0 end
+    return histDecode(e, 1e5) == nil                             -- nil: damaged; a list: only dated in the future
+end
+-- Items that may be dropped give their place back. This looks at up to max items per call, continuing where the
+-- last call stopped; it returns how many it looked at and whether it reached the end of the house.
 local sweepAt = setmetatable({}, { __mode = "k" })
 local function histSweep(H, today, max)
     local k, used = sweepAt[H], 0
     if k ~= nil and H[k] == nil then k = nil end
     while used < max do
         local id, e = next(H, k)
-        if id == nil then sweepAt[H] = nil; return used end      -- went round once
+        if id == nil then sweepAt[H] = nil; return used, true end -- went round once
         used = used + 1
-        local d = histDecode(e, today)
-        if not d or #d == 0 then H[id] = nil; histCount[H] = histCount[H] - 1; histVersion = histVersion + 1
+        if histDroppable(e, today) then H[id] = nil; histCount[H] = histCount[H] - 1; histVersion = histVersion + 1
         else k = id end
     end
     sweepAt[H] = k
-    return used
+    return used, false
 end
-local sweepLeft = 0                -- decodes the sweep may still spend in the current batch
+-- The first time a house is full on a given day, one sweep of the whole house starts, SWEEP_STEP items per frame.
+-- Until it has gone round, a new item that finds the house full waits (its row stays queued for the next frame);
+-- once it has, a house that is still full has no expired items, and new items are dropped until the next day.
+local SWEEP_STEP, BATCH_SWEEP = 200, 50  -- per frame: the whole-house pass, and what one batch of rows may add
+local capPass = setmetatable({}, { __mode = "k" })               -- house -> { day, done }
+local capSweep
+local function capNext(H, pass)
+    if C_Timer and C_Timer.After then C_Timer.After(0, function() if capPass[H] == pass and not pass.done then capSweep(H, pass) end end)
+    else pass.done = true end
+end
+capSweep = function(H, pass)
+    local _, round = histSweep(H, scanDay(now()), SWEEP_STEP)
+    if round then pass.done = true else capNext(H, pass) end
+end
+local sweepLeft, canWait = 0, false -- decodes the sweep may still spend in this batch; whether a row may wait
 local function histAdd(H, id, p, q, day)
+    if not (okNum(p, 1e12) and p >= 1 and okNum(q, 1e9) and okNum(day, 1e5)) then return end   -- a bad row takes no place
     local days
     if H[id] == nil then
-        if histCount[H] >= ns.HIST_ITEMS and sweepLeft > 0 then
-            sweepLeft = sweepLeft - histSweep(H, scanDay(now()), math.min(sweepLeft, 50))
+        if histCount[H] >= ns.HIST_ITEMS then
+            local today = scanDay(now())
+            local pass = capPass[H]
+            if not pass or pass.day ~= today then
+                pass = { day = today }; capPass[H] = pass; sweepAt[H] = nil
+                capNext(H, pass)                                 -- starts on the next frame
+            end
+            while histCount[H] >= ns.HIST_ITEMS and not pass.done and sweepLeft > 0 do
+                local used, round = histSweep(H, today, math.min(sweepLeft, 50))
+                sweepLeft = sweepLeft - used
+                if round then pass.done = true end
+            end
+            if histCount[H] >= ns.HIST_ITEMS then return (canWait and not pass.done) and "wait" or nil end
         end
-        if histCount[H] >= ns.HIST_ITEMS then return end
         days = {}
         histCount[H] = histCount[H] + 1
     else
@@ -266,7 +297,7 @@ end
 function ns.histOwn(id)
     local H = histHouse()
     local days = H and H[id] and histDecode(H[id], scanDay(now()))
-    if H and H[id] and (not days or #days == 0) then             -- all days expired, or damaged: give the place back
+    if H and H[id] and (not days or #days == 0) and histDroppable(H[id], scanDay(now())) then   -- expired or damaged
         H[id] = nil; histCount[H] = histCount[H] - 1; histVersion = histVersion + 1
     end
     local out = {}
@@ -360,22 +391,28 @@ local pend = {}                    -- items seen in the current query, written t
 -- /reload), before the game saves. The queue runs from qh to qt (explicit bounds: Lua 5.1's # is undefined on a
 -- table with holes). Each row carries the house and the day it was scanned on. A row that fails is skipped; the
 -- rest go on.
-local HIST_BATCH, SWEEP_STEP, SWEEP_LOGOUT = 400, 200, 1000
-local queue, qh, qt, qBusy = {}, 1, 0, false
+local HIST_BATCH, SWEEP_LOGOUT = 400, 1000
+local queue, qh, qt, qBusy, waiting = {}, 1, 0, false, {}
 local function histRows(stop)
     while qh <= stop do
         local w = queue[qh]
         queue[qh] = nil; qh = qh + 1                             -- past it first, so an error skips only this row
         local H = histHouseOf(w[5])
-        if H then histAdd(H, w[1], w[2], w[3], w[4]) end
+        if H and histAdd(H, w[1], w[2], w[3], w[4]) == "wait" then waiting[#waiting + 1] = w end
     end
 end
-local function histStep(all, sweep)
-    sweepLeft = sweep or SWEEP_STEP
+local function histStep(all, sweep, final)
+    sweepLeft, canWait = sweep or BATCH_SWEEP, not final        -- at logout nothing can wait
     local stop = all and qt or math.min(qt, qh + HIST_BATCH - 1)
     while qh <= stop do pcall(histRows, stop) end
+    -- Rows waiting for the sweep go to the end of the queue and are tried again on a later frame; the rest of the
+    -- batch is written meanwhile.
+    for i = 1, #waiting do qt = qt + 1; queue[qt] = waiting[i] end
+    waiting = {}
     if qh > qt then queue, qh, qt, qBusy = {}, 1, 0, false; return end
-    if C_Timer and C_Timer.After then C_Timer.After(0, function() histStep(false) end) else histStep(true) end
+    qBusy = true
+    if C_Timer and C_Timer.After then C_Timer.After(0, function() histStep(false) end)
+    elseif not all then histStep(true) end
 end
 local function flushHist()
     local k = next(pend) and DB.v == KNOWN_V and houseKey()
@@ -394,7 +431,7 @@ end
 ns.histFinish = function()
     pcall(function()
         flushHist()
-        if qh <= qt then histStep(true, SWEEP_LOGOUT) end
+        if qh <= qt then histStep(true, SWEEP_LOGOUT, true) end
         local H = histHouse()
         if H then histSweep(H, scanDay(now()), SWEEP_LOGOUT) end
     end)
