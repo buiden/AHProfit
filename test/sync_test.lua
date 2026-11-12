@@ -339,6 +339,55 @@ do
     W.guild = true
 end
 
+-- ---- review round 2 (PR-C): staging bounded, pending transfers expire, no false "updated" message
+do
+    local function up(f, name)
+        for i = 1, 200 do
+            local k, v = debug.getupvalue(f, i)
+            if k == nil then break end
+            if k == name then return v end
+        end
+        error("upvalue " .. name)
+    end
+    local c = client("ProbeFlood")
+    cur = c
+    local Y = c.ns.sync
+    local header = up(Y.receive, "header")
+    local R, held = up(header, "R"), up(header, "held")
+    local function to(msg, sender) fire(c, "CHAT_MSG_ADDON", "AHProfit", msg, "GUILD", sender or "Flood-Realm", "", 0, 0, "", 0) end
+    local function count(t) local n = 0; for _ in pairs(t) do n = n + 1 end return n end
+    W.guild = false
+    local H = G(c)
+    local t0 = math.floor(W.time)
+    for i = 1, 60000 do H.p[9000000 + i], H.q[9000000 + i], H.t[9000000 + i] = 1, 0, t0 end
+    held[H] = 60000
+    local prices = {}
+    for i = 1, 79 do prices[i] = 1 end
+    local payload = Y.encode({ p = prices, q = {} })[1]
+    to("H1,123456," .. (t0 + 1) .. ",50000,2000")
+    for seq = 1, 300 do to("D123456," .. seq .. "," .. payload) end
+    local r = R["Flood-Realm"]
+    ok("flood: the same ids repeated are staged once (at most the declared items)", r and #r.stage == 79 * 3, r and #r.stage)
+    -- a pending transfer expires 900 s after its header even with no other header: when a chunk arrives...
+    W.time = W.time + 901
+    to("D123456,301," .. payload, "Flood-Realm")
+    ok("flood: a chunk after 900 s ends the pending transfer", R["Flood-Realm"] == nil)
+    -- ...and on its own, from a timer
+    to("H1,123457," .. math.floor(W.time) .. ",50000,2000", "Flood2-Realm")
+    to("D123457,1," .. payload, "Flood2-Realm")
+    ok("flood: pending transfer present", R["Flood2-Realm"] ~= nil)
+    run(1000)
+    ok("flood: a timer ends a pending transfer nobody finishes", R["Flood2-Realm"] == nil, count(R))
+    -- a complete scan that stores nothing (the layer stays full of newer prices) reports nothing
+    for i = 1, 60000 do H.t[9000000 + i] = math.floor(W.time) + 300 end
+    local before = c.db.syncFrom
+    local said = #chat
+    to("H1,123458," .. math.floor(W.time) .. ",2,1", "Honest-Realm")
+    to("D123458,1," .. Y.encode({ p = { [5] = 10, [6] = 11 }, q = {} })[1], "Honest-Realm")
+    ok("nothing stored: no 'prices updated' message and the sender is not recorded", c.db.syncFrom == before and #chat == said and H.p[5] == nil, tostring(c.db.syncFrom) .. " " .. (#chat - said))
+    W.guild = true
+end
+
 -- ---- size of a real scan
 do
     local ns2 = {}

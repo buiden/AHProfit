@@ -195,6 +195,10 @@ end
 
 -- --------------------------------------------------------------------------------------------------- receiving --
 local R = {}
+local PENDING = 900                                              -- an unfinished transfer is forgotten after this
+local function expire(now)
+    for k, r in pairs(R) do if now - r.at > PENDING then R[k] = nil end end
+end
 local function mine(sender)
     local n, r = UnitName("player")
     if UnitFullName then n, r = UnitFullName("player") end
@@ -208,12 +212,14 @@ local function header(sender, ver, sid, t, n, chunks)
     if not (whole(t, now + AHEAD) and t >= now - BEHIND and whole(n, 50000) and n > 0 and whole(chunks, 2000) and chunks > 0 and chunks <= n) then return end
     local L, H = ns.live(), ns.shared()
     if pending and t >= L.full then pending = nil end           -- someone else is already answering the request
-    for k, r in pairs(R) do if now - r.at > 900 then R[k] = nil end end
+    expire(now)
     if t <= math.max(L.full, H.full) then return end            -- nothing newer than what is here
     held[H] = ns.pruneShared(H)                                  -- also drops entries older than 12 h
-    R[sender] = { sid = sid, t = t, n = n, chunks = chunks, got = {}, count = 0, items = 0, seen = {}, at = now, stage = {} }
+    R[sender] = { sid = sid, t = t, n = n, chunks = chunks, got = {}, count = 0, items = 0, seen = {}, at = now, stage = {}, stored = 0 }
+    C_Timer.After(PENDING + 5, function() expire(ns.now()) end)  -- also when nobody sends anything more
 end
 local function chunk(sender, sid, seq, payload)
+    expire(ns.now())
     local r = R[sender]
     if not r or r.sid ~= sid or not whole(seq, r.chunks) or seq < 1 or r.got[seq] then return end
     local list = Y.decode(payload)
@@ -225,13 +231,16 @@ local function chunk(sender, sid, seq, payload)
     H.from[t] = name
     for i = 1, #list, 3 do
         local id = list[i]
-        if not seen[id] then seen[id] = true; r.items = r.items + 1 end
-        if H.p[id] == nil and n >= Y.MAXITEMS then             -- full: kept aside until the scan is complete
-            local st = r.stage
-            st[#st + 1] = id; st[#st + 1] = list[i + 1]; st[#st + 1] = list[i + 2]
-        elseif (H.t[id] or 0) < t then
-            if H.p[id] == nil then n = n + 1 end
-            H.p[id], H.q[id], H.t[id] = list[i + 1], list[i + 2], t
+        if not seen[id] then                                     -- each item once per transfer, so the set-aside
+            seen[id] = true; r.items = r.items + 1               -- list never exceeds the declared item count
+            if H.p[id] == nil and n >= Y.MAXITEMS then         -- full: kept aside until the scan is complete
+                local st = r.stage
+                st[#st + 1] = id; st[#st + 1] = list[i + 1]; st[#st + 1] = list[i + 2]
+            elseif (H.t[id] or 0) < t then
+                if H.p[id] == nil then n = n + 1 end
+                H.p[id], H.q[id], H.t[id] = list[i + 1], list[i + 2], t
+                r.stored = r.stored + 1
+            end
         end
     end
     held[H] = n
@@ -250,15 +259,17 @@ local function chunk(sender, sid, seq, payload)
         elseif (H.t[id] or 0) < t then
             if H.p[id] == nil then held[H] = held[H] + 1 end
             H.p[id], H.q[id], H.t[id] = st[i + 1], st[i + 2], t
+            r.stored = r.stored + 1
         end
     end
     if complete and t > H.full then H.full = t end
     local used = {}
     for _, it in pairs(H.t) do used[it] = true end
     for k in pairs(H.from) do if not used[k] then H.from[k] = nil end end
+    if r.stored == 0 then return end                             -- nothing of it could be kept: say nothing
     local DB = ns.db()
     DB.syncFrom, DB.syncAt = name, t
-    ns.say("prices updated from " .. DB.syncFrom .. "'s scan (" .. ns.age(t) .. "), " .. r.n .. " items.")
+    ns.say("prices updated from " .. DB.syncFrom .. "'s scan (" .. ns.age(t) .. "), " .. r.stored .. " items.")
 end
 local function request(have)
     if out then if out.t > have then again = true end return end
