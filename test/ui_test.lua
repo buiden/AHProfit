@@ -244,7 +244,7 @@ do
     ok("drops show the scanned price and its listed count", d[1] and d[1].each == 50000000 * CUT and d[1].listed == 7, d[1] and (d[1].each .. " " .. d[1].listed))
     ok("best() uses the scanned price", F.best(nd[6][1], CUT) == 50000000 * CUT)
     S.tab = "mine"; UI:Refresh()
-    ok("the status line says newer scans count", UI.status:GetText():find("or your own newer scan", 1, true), UI.status:GetText())
+    ok("the status line says a newer price counts", UI.status:GetText():find("or the addon's newer price for the item", 1, true), UI.status:GetText())
     -- a scan older than the farm data does not override it
     L.t[ore[2]] = T - 60
     ok("an older scan leaves the ranking alone", snap() == base)
@@ -332,6 +332,12 @@ do
     SlashCmdList.AHPROFIT("bags")
     local S2 = AHProfitDB.farm
     ok("/ahp bags opens the bags tab", AHProfitFarmFrame:IsShown() and S2.tab == "bags")
+    ok("status without full scans names only the feed", plain(U.status:GetText()):find("^Prices: the feed from "), plain(U.status:GetText()))
+    if n2.shared then
+        local Hs = n2.shared(); Hs.full = W.time - 600; Lv.full = W.time - 1800; U:Refresh()
+        ok("status names your scan and the guild's separately", plain(U.status:GetText()):find("Prices: your scan 30m ago, a guild scan 10m ago, else the feed from ", 1, true), plain(U.status:GetText()))
+        Hs.full = 0; Lv.full = 0; U:Refresh()
+    else ok("status names your scan and the guild's separately", false, "no shared layer") end
     ok("bags headline", plain(U.head:GetText()):find("Auction 2 for 85s 50c, vendor the rest for 22s 50c: 32s 50c more than vendoring it all.", 1, true), plain(U.head:GetText()))
     ok("bags headline says one is loading", plain(U.head:GetText()):find("1 still loading", 1, true))
     ok("setup rows hidden on a tool tab", not U.boxes.lvMin:IsShown() and not U.checks.mining:IsShown() and U.intro:GetText() ~= "")

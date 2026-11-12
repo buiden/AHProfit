@@ -147,6 +147,15 @@ do
     local d = as(a).deals()
     ok("two items below vendor price, best first", #d == 2 and d[1].id == 102 and d[1].gain == 30 and d[2].id == 100 and d[2].gain == 3 and d[2].qty == 40, #d)
     ok("an item above its vendor price is not a deal", d[1].id ~= 101 and d[2].id ~= 101)
+    -- an item priced only by a guild member's scan is checked too, and says where its price came from
+    cur = a
+    local Hs = a.ns.shared and a.ns.shared() or {}
+    if Hs.p then Hs.p[103], Hs.q[103], Hs.t[103], Hs.from = 5, 4, GetServerTime(), { [GetServerTime()] = "Ahmed" } end
+    IT[103] = { "Guild Thing", 9 }; as(a).vendorScan(); run(5)
+    local d3, g = as(a).deals(), nil
+    for _, x in ipairs(d3) do if x.id == 103 then g = x end end
+    ok("a guild-priced item can be a deal, named as the guild's price", g and g.src == "guild" and g.from == "Ahmed" and a.ns.srcLabel(g.src, g.t, g.from):find("^guild %(Ahmed, "), g and tostring(g.src))
+    if Hs.p then Hs.p[103], Hs.q[103], Hs.t[103] = nil, nil, nil end; IT[103] = nil
     local day = math.floor(GetServerTime() / 86400)
     a.ns.hist = { GetServerTime(), { day - 4, 5 }, { { "Copper Ore", 2770, day - 4, 100, 100, 90, 110, 100, 120 }, { "Copper Bar", 2840, day - 4, 50, 50, 50 } } }
     price(a, 2770, 80, 500)
