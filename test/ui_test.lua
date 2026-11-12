@@ -283,6 +283,27 @@ do
     ns.lookup = saved
 end
 
+-- ---- a crafted item priced by Auctionator (no listed count): its detail opens and claims no count
+do
+    local t0, rt = W.time, time
+    W.time = F.time() + 2 * 86400
+    time = function(x) if type(x) == "table" then return 1577836800 end return W.time end
+    Auctionator = { API = { v1 = { GetAuctionAgeByItemID = function(_, id) return id == 2862 and 0 or nil end,
+        GetAuctionPriceByItemID = function(_, id) return id == 2862 and 100 or nil end } } }
+    local s = AHProfitDB.farm
+    s.mining, s.blacksmithing, s.mSkill, s.bSkill, s.tab = true, true, 300, 300, "craft"
+    UI.sel = nil
+    local sel
+    for i, x in ipairs(UI:Entries()) do if x.left == "Rough Sharpening Stone" then sel = i end end
+    UI.sel = sel
+    local okR, err = pcall(UI.Refresh, UI)
+    local d = okR and UI.detail and UI.detail:GetText() or ""
+    ok("craft detail with an Auctionator price opens and leaves the listed count out", sel ~= nil and okR and d ~= "" and not d:find("listed", 1, true),
+        tostring(sel) .. " " .. tostring(err) .. " " .. d:sub(1, 120))
+    Auctionator, time, W.time = nil, rt, t0
+    UI.sel = 1; UI:Refresh()
+end
+
 -- ================================================================ bags, deposits, session and price history ==
 do
     AHProfitDB = nil; AHProfitFarmFrame = nil; SlashCmdList = {}; UISpecialFrames = {}
@@ -485,6 +506,17 @@ do
         ok("deals tab lists an auction below vendor price", hit ~= nil and plain(hit.right) == "+60c each" and hit.sub:find("below vendor price, 9 listed", 1, true), hit and plain(hit.right))
         local lines = hit and hit.detail() or {}
         ok("deal detail states both prices and the gain", #lines >= 4 and plain(lines[3]):find("A vendor pays 5s 0c each: +60c per unit", 1, true), lines[3] and plain(lines[3]))
+        do  -- an unknown listed count (Auctionator) is left out, never "0 listed"
+            local real = n2.lookup
+            n2.lookup = function(id) local p, q, t, s, f = real(id); if id == 900002 and p then return p, nil, W.time, "auctionator" end return p, q, t, s, f end
+            U.tabs.deals.scripts.OnClick[1]()
+            local h2
+            for _, x in ipairs(U.entries) do if x.left == "Thin Margin" then h2 = x end end
+            local dl = h2 and table.concat(h2.detail(), " | ") or ""
+            ok("deals: an unknown listed count is left out of the row and its detail", h2 and h2.sub == "below vendor price" and not plain(dl):find("listed", 1, true)
+                and plain(dl):find("AH lowest (Auctionator, today): 4s 40c each", 1, true), h2 and (h2.sub .. " / " .. plain(dl)))
+            n2.lookup = real
+        end
         ok("deals head counts them", plain(U.head:GetText()):find("below vendor price", 1, true), U.head:GetText())
         price(900002, was, 9)
         price(900001, 600, 50)                                   -- the history test above removed its price
@@ -511,6 +543,15 @@ do
         AHProfitDB.rec = { [X.me()] = { [5] = { n = "Test Blade", out = 900003, lo = 1, hi = 1, mats = { 900001, 1 }, prof = "Blacksmithing" } } }
         U.tabs.rec.scripts.OnClick[1]()
         ok("recipes tab shows profit per craft", #U.entries == 1 and U.entries[1].left == "Test Blade" and plain(U.entries[1].right) == "+3s 50c", U.entries[1] and plain(U.entries[1].right))
+        do  -- an unknown listed count (Auctionator) is left out of the recipe detail
+            local real = n2.lookup
+            n2.lookup = function(id) local p, q, t, s, f = real(id); if id == 900003 and p then return p, nil, W.time, "auctionator" end return p, q, t, s, f end
+            U.tabs.rec.scripts.OnClick[1]()
+            local rl = U.entries[1] and plain(table.concat(U.entries[1].detail(), " | ")) or ""
+            ok("recipes: an unknown listed count is left out of the detail", rl:find("Sells for", 1, true) and rl:find("Auctionator, today", 1, true) and not rl:find("listed", 1, true), rl)
+            n2.lookup = real
+            U.tabs.rec.scripts.OnClick[1]()
+        end
         AHProfitDB.bank = { [X.me()] = { t = W.time, items = { { 900001, 3, 0 } } } }
         U.tabs.bags.scripts.OnClick[1]()
         local nb = 0

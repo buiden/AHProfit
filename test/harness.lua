@@ -495,6 +495,46 @@ do
     ok("auctionator: ...and stays off after a reload", select(4, ns.lookup(fid)) == "feed")
     SlashCmdList.AHPROFIT("auctionator on"); fresh()
     ok("auctionator: /ahp auctionator on brings it back", select(4, ns.lookup(fid)) == "auctionator" and AHProfitDB.useAuctionator == true)
+    -- a complete scan of yours or the guild's newer than Auctionator's day start, without the item: not listed
+    do
+        local L2, H2 = ns.live(), ns.shared()
+        local ds = S.time - (S.time - (1577836800 - 4 * 3600)) % 86400
+        S.time = ds + 7200; fresh()
+        local sf, hf = L2.full, H2.full
+        L2.full = ds + 60
+        p, _, _, src = ns.lookup(fid)
+        ok("auctionator: your complete scan after its day start without the item means not listed", src ~= "auctionator", tostring(src))
+        L2.full, H2.full = 0, ds + 60; fresh()
+        p, _, _, src = ns.lookup(fid)
+        ok("auctionator: ...and the same for a guild member's complete scan", src ~= "auctionator", tostring(src))
+        L2.full, H2.full = ds - 60, ds - 60; fresh()
+        p, _, _, src = ns.lookup(fid)
+        ok("auctionator: a complete scan from before its day start still lets it fill in", src == "auctionator", tostring(src))
+        L2.full, H2.full = sf, hf
+        -- around midnight: a price cached just before is not shown as today's after it
+        fresh(); S.time = ds + 86400 - 5                         -- fresh() moves the clock: set it after
+        A.age[fid] = 0
+        p, _, _, src = ns.lookup(fid)
+        local before = src
+        S.time = S.time + 10; A.age[fid] = 1                     -- Auctionator now says it was seen yesterday
+        p, _, _, src = ns.lookup(fid)
+        ok("auctionator: after midnight a cached answer from yesterday is asked again (age 1: not used)", before == "auctionator" and src ~= "auctionator", tostring(before) .. " " .. tostring(src))
+        A.age[fid] = 0; fresh()
+    end
+    -- the server clock 3 hours ahead of the computer's: the day start is Auctionator's (computer clock), never later
+    -- than the sighting
+    do
+        local anchor = 1577836800 - 4 * 3600
+        local base = anchor + 2500 * 86400
+        local pc = base + 23 * 3600 + 1800
+        local st = S.time
+        fresh(); S.time = pc + 3 * 3600
+        time = function(x) if type(x) == "table" then return anchor end return pc end
+        p, _, t, src = ns.lookup(fid)
+        ok("auctionator: its day start comes from the computer's clock, as Auctionator counts days", src == "auctionator" and t == base, tostring(src) .. " " .. tostring(t and t - base))
+        time = function(x) if type(x) == "table" then return 1577836800 - 4 * 3600 end return S.time end
+        S.time = st; fresh()
+    end
     -- a partial API (an older or newer Auctionator) is left alone
     Auctionator = { API = { v1 = { GetAuctionAgeByItemID = function() return 0 end } } }; fresh()
     ok("auctionator: without both API functions nothing is asked", select(4, ns.lookup(fid)) == "feed")

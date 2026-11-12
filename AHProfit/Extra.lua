@@ -216,14 +216,14 @@ function X.deals()
         local v = V[id]
         if v and v > 0 then
             local p, q, t, src, from = ns.lookup(id)
-            if p and p < v then out[#out + 1] = { kind = "vendor", id = id, name = itemName(id), price = p, vendor = v, gain = v - p, qty = q or 0, t = t, src = src, from = from } end
+            if p and p < v then out[#out + 1] = { kind = "vendor", id = id, name = itemName(id), price = p, vendor = v, gain = v - p, qty = q, t = t, src = src, from = from } end
         end
     end
     for _, u in ipairs(X.usualPrices()) do
         local now, q, t, src, from = ns.lookup(u.id)
         if now and now <= u.med * X.DIP then
             out[#out + 1] = { kind = "dip", id = u.id, name = u.name or itemName(u.id), price = now, usual = u.med, days = u.days, own = u.own,
-                below = 1 - now / u.med, qty = q or 0, t = t, src = src, from = from }
+                below = 1 - now / u.med, qty = q, t = t, src = src, from = from }
         end
     end
     table.sort(out, function(a, b)
@@ -327,7 +327,7 @@ local function calc(rid, r, C)
     if net > 0 and net >= (type(vendor) == "number" and vendor or 0) then each, how = net, "ah"
     elseif type(vendor) == "number" and vendor > 0 then each, how = vendor, "vendor" end
     local row = { rid = rid, name = r.n, prof = r.prof, out = r.out, makes = makes, lo = r.lo, hi = r.hi, each = each, how = how, value = each * makes,
-        price = price, listed = qty or 0, qtyKnown = qty ~= nil, t = t, src = src, from = from, mats = {}, cost = 0, raw = 0, known = true }
+        price = price, listed = qty, t = t, src = src, from = from, mats = {}, cost = 0, raw = 0, known = true }
     for k = 1, #r.mats, 2 do
         local id, q = r.mats[k], r.mats[k + 1]
         local c, from = unitCost(id)
@@ -372,7 +372,7 @@ function X.profText(rid, C)
     local makes = r.lo == r.hi and ("x" .. r.lo) or ("x" .. r.lo .. "-" .. r.hi)
     local a = "|cffffd100AH Profit|r  " .. r.name .. " " .. makes .. ": "
     if not r.how then return a .. "no auction listing and no vendor value for what it makes." end
-    a = a .. "sells for " .. ns.money(math.floor(r.value + 0.5)) .. (r.how == "ah" and (" on the AH after the " .. C .. "% cut (" .. (r.qtyKnown and (r.listed .. " listed, ") or "") .. ns.srcLabel(r.src, r.t, r.from) .. ")") or " at a vendor")
+    a = a .. "sells for " .. ns.money(math.floor(r.value + 0.5)) .. (r.how == "ah" and (" on the AH after the " .. C .. "% cut (" .. (r.listed and (r.listed .. " listed, ") or "") .. ns.srcLabel(r.src, r.t, r.from) .. ")") or " at a vendor")
     local b
     if r.profit then
         b = "Materials " .. ns.money(math.floor(r.cost + 0.5)) .. ".  Profit " .. (r.profit >= 0 and "|cff40ff40" or "|cffff5050") .. signed(r.profit) .. "|r"

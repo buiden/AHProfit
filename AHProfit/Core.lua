@@ -129,7 +129,7 @@ end
 -- known; the time returned is the start of Auctionator's day, the earliest the price can be from. Answers are kept
 -- for a minute, so a list of thousands of items asks once per item.
 local AUC_ID, AUC_KEEP, DAY0_UTC = "AHProfit", 60, 1577836800
-local aucCache, aucAt = {}, 0
+local aucCache, aucAt, aucDay = {}, 0, 0
 local function aucDayStart(t)
     local ok, day0 = pcall(time, { year = 2020, month = 1, day = 1, hour = 0 })
     if not ok or type(day0) ~= "number" or day0 > t then day0 = DAY0_UTC end
@@ -140,7 +140,12 @@ local function auctionator(id)
     local api = type(Auctionator) == "table" and type(Auctionator.API) == "table" and Auctionator.API.v1
     if type(api) ~= "table" or type(api.GetAuctionAgeByItemID) ~= "function" or type(api.GetAuctionPriceByItemID) ~= "function" then return end
     local t = now()
-    if t - aucAt > AUC_KEEP or t < aucAt then aucCache, aucAt = {}, t end
+    -- Auctionator counts days on the computer's clock (time()), so its day start is taken from that clock too.
+    local okC, clock = pcall(time)
+    local ds = aucDayStart((okC and type(clock) == "number") and clock or t)
+    -- The cache is dropped after a minute and whenever Auctionator's day changes: an answer from before midnight
+    -- ("seen today") is not today's after it.
+    if t - aucAt > AUC_KEEP or t < aucAt or ds ~= aucDay then aucCache, aucAt, aucDay = {}, t, ds end
     local c = aucCache[id]
     if c == nil then
         c = false
@@ -151,7 +156,7 @@ local function auctionator(id)
         end
         aucCache[id] = c
     end
-    if c then return c, aucDayStart(t) end
+    if c then return c, ds end
 end
 ns.auctionatorPrice = auctionator
 
@@ -159,7 +164,8 @@ ns.auctionatorPrice = auctionator
 -- and, for "guild", the sender's name. Order: your own scan when it is at most 2 hours old (always, whatever the
 -- feed's age or a guild member's claim), then a guild member's scan newer than yours, then your older scan, then
 -- the bundled feed. A scan older than the feed loses to the feed. When there is no scan of yours or the guild's, or
--- the newest is more than 24 hours old, a price Auctionator saw today comes before them (its listed count is nil).
+-- the newest is more than 24 hours old, a price Auctionator saw today comes before them (its listed count is nil),
+-- unless a complete scan of yours or the guild's since Auctionator's day started did not have the item.
 local OWN_FRESH, AUC_AFTER = 7200, 86400
 local function lookup(id)
     local L, H = live(), shared()
@@ -167,7 +173,10 @@ local function lookup(id)
     if lp and now() - lt <= OWN_FRESH then return lp, L.q[id], lt, "scan" end
     local gp, gt = H.p[id], H.t[id]
     local newest = math.max(lp and lt or 0, gp and gt or 0)
-    if now() - newest > AUC_AFTER then
+    -- A complete scan (yours or the guild's) since Auctionator's day started is the whole truth: an item not in it
+    -- is not listed, and Auctionator's older sighting from the same day does not bring it back.
+    local okC, clock = pcall(time)                                 -- the computer's clock, as Auctionator counts days
+    if now() - newest > AUC_AFTER and math.max(L.full, H.full) <= aucDayStart((okC and type(clock) == "number") and clock or now()) then
         local ap, at = auctionator(id)
         if ap then return ap, nil, at, "auctionator" end
     end

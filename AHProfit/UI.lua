@@ -174,7 +174,7 @@ local function craftEntries(CUT)
         out[#out + 1] = { left = r.name .. (r.makes > 1 and (" x" .. r.makes) or ""), sub = r.ok and "" or ("needs " .. who .. r.skill),
             right = (r.own >= 0 and "+" or "") .. coin(r.own), v = r.own, dim = not r.ok,
             detail = function()
-                return { "|cffffd100" .. r.name .. "|r  " .. grey(who .. r.skill .. ", " .. r.listed .. " listed"),
+                return { "|cffffd100" .. r.name .. "|r  " .. grey(who .. r.skill .. (r.listed and (", " .. r.listed .. " listed") or "")),
                     "Materials: " .. F.mats(r.c),
                     "Sells for (after cut): " .. coin(r.net),
                     "With your own materials, compared with selling them raw: " .. (r.own >= 0 and "+" or "") .. coin(r.own),
@@ -310,10 +310,10 @@ local function dealEntries()
     if not UI.dealAsk or t - UI.dealAsk > 60 then UI.dealAsk = t; X.vendorScan() end
     for _, d in ipairs(X.deals()) do
         if d.kind == "vendor" then
-            out[#out + 1] = { left = d.name, sub = "below vendor price, " .. d.qty .. " listed", right = "|cff40ff40+" .. coin(d.gain) .. "|r each", v = d.gain,
+            out[#out + 1] = { left = d.name, sub = "below vendor price" .. (d.qty and (", " .. d.qty .. " listed") or ""), right = "|cff40ff40+" .. coin(d.gain) .. "|r each", v = d.gain,
                 detail = function()
                     return { "|cffffd100" .. d.name .. "|r  buy it on the auction house, sell it to a vendor",
-                        "AH lowest (" .. fresh(d.src, d.t, d.from) .. "): " .. coin(d.price) .. " each, " .. d.qty .. " listed",
+                        "AH lowest (" .. fresh(d.src, d.t, d.from) .. "): " .. coin(d.price) .. " each" .. (d.qty and (", " .. d.qty .. " listed") or ""),
                         "A vendor pays " .. coin(d.vendor) .. " each: |cff40ff40+" .. coin(d.gain) .. "|r per unit, with no auction cut and no deposit.",
                         grey("Only the cheapest listing is known to be this low; the next one may cost more. Check the price before you buy."),
                         grey("A price from the feed can be up to an hour old, and someone else may have bought it. Nothing is bought for you.") }
@@ -322,7 +322,7 @@ local function dealEntries()
             out[#out + 1] = { left = d.name, sub = pct(d.below) .. " under its usual price", right = coin(d.price), v = d.below,
                 detail = function()
                     return { "|cffffd100" .. d.name .. "|r  cheaper than usual",
-                        "AH lowest now (" .. fresh(d.src, d.t, d.from) .. "): " .. coin(d.price) .. " each, " .. d.qty .. " listed",
+                        "AH lowest now (" .. fresh(d.src, d.t, d.from) .. "): " .. coin(d.price) .. " each" .. (d.qty and (", " .. d.qty .. " listed") or ""),
                         "Usual price: " .. coin(d.usual) .. grey("  the middle of its daily prices over " .. d.days .. " days" .. (d.own and ", from your own scans" or ", from the bundled price feed")),
                         "That is " .. pct(d.below) .. " lower." .. (d.own and "" or " The Prices tab shows its graph."),
                         grey("A low price can stay low. This is not a promise that it rises again.") }
@@ -340,7 +340,7 @@ local function recEntries()
         out[#out + 1] = { left = r.name .. (r.makes ~= 1 and (" x" .. (r.lo == r.hi and r.lo or (r.lo .. "-" .. r.hi))) or ""), sub = r.prof, right = right, v = r.profit or 0, dim = r.profit == nil,
             detail = function()
                 local L = { "|cffffd100" .. r.name .. "|r  " .. grey(r.prof ~= "" and r.prof or "profession") }
-                if r.how == "ah" then L[#L + 1] = "Sells for " .. coin(r.value) .. " on the AH after the " .. C .. "% cut" .. grey("  " .. coin(r.price) .. " each, " .. r.listed .. " listed, " .. fresh(r.src, r.t, r.from))
+                if r.how == "ah" then L[#L + 1] = "Sells for " .. coin(r.value) .. " on the AH after the " .. C .. "% cut" .. grey("  " .. coin(r.price) .. " each, " .. (r.listed and (r.listed .. " listed, ") or "") .. fresh(r.src, r.t, r.from))
                 elseif r.how == "vendor" then L[#L + 1] = "Sells for " .. coin(r.value) .. " at a vendor" .. grey("  no auction listing pays more")
                 else L[#L + 1] = "What it makes has no auction listing and no vendor value." end
                 L[#L + 1] = "Materials:"
