@@ -663,6 +663,7 @@ SlashCmdList["AHPROFIT"] = function(msg)
         if ns.ui then ns.ui:Refresh() end
     elseif msg == "sync on" or msg == "sync off" then DB.sync = msg == "sync on"; say("guild sharing " .. msg:sub(6) .. ".")
     elseif msg == "share" then if ns.sync then ns.sync.broadcast() end
+    elseif ns.bags and ns.bags.slash(msg) then                   -- keep, unkeep, bagfull (Bags.lua)
     elseif msg == "cut 5" or msg == "cut 15" then DB.cut = tonumber(msg:sub(5)); say("cut set to " .. DB.cut .. "%."); if ns.ui then ns.ui:Refresh() end
     else
         local L, n = live(), 0
@@ -675,6 +676,6 @@ SlashCmdList["AHPROFIT"] = function(msg)
         if type(Auctionator) == "table" and type(Auctionator.API) == "table" then
             say("Auctionator: " .. (DB.useAuctionator == false and "off" or "on, its prices seen today fill in when yours are missing or over a day old") .. ".")
         end
-        say("/ahp farm | scan | scan stop | share | sync on | sync off | auctionator on | auctionator off | on | off | auto on | auto off | cut 5 | cut 15")
+        say("/ahp farm | scan | scan stop | share | sync on | sync off | auctionator on | auctionator off | on | off | auto on | auto off | cut 5 | cut 15 | keep <item> | unkeep <item> | bagfull <0-20> | bagfull off")
     end
 end
