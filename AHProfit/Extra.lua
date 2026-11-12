@@ -73,6 +73,9 @@ local function pricedIds()
     for id in pairs(ns.live().p) do
         if not seen[id] then seen[id] = true; ids[#ids + 1] = id end
     end
+    for id in pairs(ns.shared().p) do
+        if not seen[id] then seen[id] = true; ids[#ids + 1] = id end
+    end
     local S = ns.seed
     if S and S.flat and not (S.faction and UnitFactionGroup and UnitFactionGroup("player") ~= S.faction) then
         for i = 1, #S.flat, 3 do
@@ -134,7 +137,76 @@ local function median(ps)
 end
 X.DIP = 0.75
 -- kind "vendor": the lowest auction is below what a vendor pays, so buying it and vendoring it gains `gain` each.
--- kind "dip": a material is at or below 75% of its own usual price (the middle of its daily prices, 5 days or more).
+-- kind "dip": an item is at or below 75% of its own usual price (the middle of its daily prices, 5 days or more).
+-- Daily prices come from your own scans (ns.histOwn, the day's highest low) when they cover 5 days or more, else
+-- from the bundled History.lua; own = true says which.
+-- The usual price (median of 5 or more daily prices) of every item that has one. Decoding every history string is
+-- the slow part, so the result is kept until the next history write, a house change, a new day or another bundled
+-- history table.
+local usual = {}
+local function usualKey()
+    local H = ns.histHouse and ns.histHouse()
+    return tostring(H) .. "|" .. (ns.histVersion and ns.histVersion() or 0) .. "|" .. (ns.scanDay and ns.scanDay(ns.now()) or 0) .. "|" .. tostring(ns.hist)
+end
+-- Per item, the decoded own prices are also kept with the string they came from (strings are interned, so the
+-- comparison is cheap): after a write only the items whose string changed are decoded again.
+local ownMemo = setmetatable({}, { __mode = "k" })               -- house table -> { [id] = { s, day, n, med } }
+local bundledMemo = {}                                           -- { hist = table, [idx] = { n, med } }
+local function usualOf(ps) return { n = #ps, med = #ps >= 5 and median(ps) or nil } end
+local function ownUsual(H, id, today)
+    local m = ownMemo[H]
+    if not m then m = {}; ownMemo[H] = m end
+    local e, s = m[id], H[id]
+    if e and e.s == s and e.day == today then return e end
+    local ps = {}
+    for i, p in ipairs(ns.histOwn and ns.histOwn(id) or {}) do ps[i] = p.p end
+    e = usualOf(ps)
+    e.s, e.day = H[id], today
+    m[id] = H[id] and e or nil                                   -- (an expired item may have just been dropped)
+    return e
+end
+local function bundledUsual(idx)
+    if bundledMemo.hist ~= ns.hist then bundledMemo = { hist = ns.hist } end
+    local e = bundledMemo[idx]
+    if not e then
+        local ps, s = {}, Tl.histSeries(idx)
+        if s then for i, p in ipairs(s.pts) do ps[i] = p.p end end
+        e = usualOf(ps)
+        bundledMemo[idx] = e
+    end
+    return e
+end
+-- A copy is handed out, so a caller changing it cannot change the next answer.
+local function copyList(list)
+    local out = {}
+    for i, u in ipairs(list) do out[i] = { id = u.id, name = u.name, med = u.med, days = u.days, own = u.own } end
+    return out
+end
+function X.usualPrices()
+    if usual.key == usualKey() then return copyList(usual.list) end
+    local list, cands, done = {}, {}, {}
+    local H = ns.histHouse and ns.histHouse()
+    local today = ns.scanDay and ns.scanDay(ns.now()) or 0
+    if H then for id in pairs(H) do cands[#cands + 1] = { id = id } end end
+    for _, m in ipairs(Tl.histList()) do cands[#cands + 1] = { id = m.id, name = m.name, idx = m.idx } end
+    for _, c in ipairs(cands) do
+        if not done[c.id] then
+            local u, own = nil, false
+            local mine = (H and H[c.id]) and ownUsual(H, c.id, today)
+            if mine and mine.med then
+                u, own = mine, true
+            elseif c.idx then
+                u = bundledUsual(c.idx)
+            end
+            if u and u.med then
+                done[c.id] = true
+                list[#list + 1] = { id = c.id, name = c.name, med = u.med, days = u.n, own = own }
+            end
+        end
+    end
+    usual.key, usual.list = usualKey(), list                     -- after the reads above (they may drop expired items)
+    return copyList(list)
+end
 function X.deals()
     local D, out = db(), {}
     if not D or not Tl then return out end
@@ -142,22 +214,15 @@ function X.deals()
     for _, id in ipairs(pricedIds()) do
         local v = V[id]
         if v and v > 0 then
-            local p, q, t, src = ns.lookup(id)
-            if p and p < v then out[#out + 1] = { kind = "vendor", id = id, name = itemName(id), price = p, vendor = v, gain = v - p, qty = q or 0, t = t, src = src } end
+            local p, q, t, src, from = ns.lookup(id)
+            if p and p < v then out[#out + 1] = { kind = "vendor", id = id, name = itemName(id), price = p, vendor = v, gain = v - p, qty = q or 0, t = t, src = src, from = from } end
         end
     end
-    for _, m in ipairs(Tl.histList()) do
-        local s = Tl.histSeries(m.idx)
-        if s and #s.pts >= 5 then
-            local now, q, t, src = ns.lookup(m.id)
-            if now then
-                local ps = {}
-                for i, p in ipairs(s.pts) do ps[i] = p.p end
-                local med = median(ps)
-                if now <= med * X.DIP then
-                    out[#out + 1] = { kind = "dip", id = m.id, name = m.name, price = now, usual = med, days = #ps, below = 1 - now / med, qty = q or 0, t = t, src = src }
-                end
-            end
+    for _, u in ipairs(X.usualPrices()) do
+        local now, q, t, src, from = ns.lookup(u.id)
+        if now and now <= u.med * X.DIP then
+            out[#out + 1] = { kind = "dip", id = u.id, name = u.name or itemName(u.id), price = now, usual = u.med, days = u.days, own = u.own,
+                below = 1 - now / u.med, qty = q or 0, t = t, src = src, from = from }
         end
     end
     table.sort(out, function(a, b)
@@ -254,14 +319,14 @@ end
 -- profit is nil while any material has no known price; own is nil while the output has no price.
 local function calc(rid, r, C)
     local makes = (r.lo + r.hi) / 2
-    local price, qty, t, src = ns.lookup(r.out)
+    local price, qty, t, src, from = ns.lookup(r.out)
     local _, vendor = Tl.info(r.out)
     local net = price and afterCut(price, C) or 0
     local each, how = 0, nil
     if net > 0 and net >= (type(vendor) == "number" and vendor or 0) then each, how = net, "ah"
     elseif type(vendor) == "number" and vendor > 0 then each, how = vendor, "vendor" end
     local row = { rid = rid, name = r.n, prof = r.prof, out = r.out, makes = makes, lo = r.lo, hi = r.hi, each = each, how = how, value = each * makes,
-        price = price, listed = qty or 0, t = t, src = src, mats = {}, cost = 0, raw = 0, known = true }
+        price = price, listed = qty or 0, t = t, src = src, from = from, mats = {}, cost = 0, raw = 0, known = true }
     for k = 1, #r.mats, 2 do
         local id, q = r.mats[k], r.mats[k + 1]
         local c, from = unitCost(id)
@@ -306,7 +371,7 @@ function X.profText(rid, C)
     local makes = r.lo == r.hi and ("x" .. r.lo) or ("x" .. r.lo .. "-" .. r.hi)
     local a = "|cffffd100AH Profit|r  " .. r.name .. " " .. makes .. ": "
     if not r.how then return a .. "no auction listing and no vendor value for what it makes." end
-    a = a .. "sells for " .. ns.money(math.floor(r.value + 0.5)) .. (r.how == "ah" and (" on the AH after the " .. C .. "% cut (" .. r.listed .. " listed, " .. (r.src == "scan" and "scan " or "feed ") .. ns.age(r.t) .. ")") or " at a vendor")
+    a = a .. "sells for " .. ns.money(math.floor(r.value + 0.5)) .. (r.how == "ah" and (" on the AH after the " .. C .. "% cut (" .. r.listed .. " listed, " .. ns.srcLabel(r.src, r.t, r.from) .. ")") or " at a vendor")
     local b
     if r.profit then
         b = "Materials " .. ns.money(math.floor(r.cost + 0.5)) .. ".  Profit " .. (r.profit >= 0 and "|cff40ff40" or "|cffff5050") .. signed(r.profit) .. "|r"
@@ -501,8 +566,8 @@ function X.auctions(C)
     for _, a in ipairs(o.list) do
         if type(a) == "table" and type(a[1]) == "number" and type(a[2]) == "number" and type(a[3]) == "number" then
             local name = itemName(a[1])
-            local low, _, lt, src = ns.lookup(a[1])
-            local r = { id = a[1], name = name, q = a[2], each = a[3], net = afterCut(a[3], C) * a[2], sold = a[4] == 1, low = low, lowT = lt, src = src }
+            local low, _, lt, src, from = ns.lookup(a[1])
+            local r = { id = a[1], name = name, q = a[2], each = a[3], net = afterCut(a[3], C) * a[2], sold = a[4] == 1, low = low, lowT = lt, src = src, from = from }
             r.under = (not r.sold) and low ~= nil and a[3] > 0 and low < a[3]
             r.soldN, r.expiredN = X.sellThrough(name)
             if r.sold then tot.soldN = tot.soldN + 1

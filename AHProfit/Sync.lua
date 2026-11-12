@@ -1,5 +1,8 @@
 -- AH Profit guild sync: when one player finishes a full auction house scan, the prices go to every guild member
 -- running the addon over the hidden addon channel, so nobody else needs to scan or reload.
+-- Received prices go into a separate shared layer (ns.shared, see Core.lua): they never change or delete your own
+-- scans, and only your own full scan is ever sent on. A scan time more than 5 minutes ahead or more than 12 hours
+-- behind your clock is refused, so a wrong clock cannot replace good prices or block later ones.
 -- Messages (each at most 255 bytes, plain text):
 --   H<ver>,<session>,<scan time>,<items>,<chunks>     start of a scan
 --   D<session>,<chunk number>,<payload>               items: id step, price, quantity as base-32 digits
@@ -10,6 +13,9 @@ local _, ns = ...
 local Y = {}
 ns.sync = Y
 local PFX, VER, MAXLEN, GAP = "AHProfit", 1, 238, 1.05
+local AHEAD, BEHIND = 300, 43200           -- accepted scan times: up to 5 min in the future, up to 12 h old
+Y.MAXITEMS = 60000                         -- hard cap on items kept in one house's shared layer
+local held = setmetatable({}, { __mode = "k" })   -- shared layer -> item count, recounted for every accepted scan
 local A = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+/"
 local DEC = {}
 for i = 1, 64 do DEC[A:byte(i)] = i - 1 end
@@ -131,8 +137,8 @@ function Y.broadcast(quiet)
 end
 function Y.ask()
     if not on() or not inGuild() then return end
-    local L = ns.live()
-    send("Q" .. VER .. "," .. math.floor(math.max(L.full, ns.seed and ns.seed.t or 0)))
+    local L, H = ns.live(), ns.shared()
+    send("Q" .. VER .. "," .. math.floor(math.max(L.full, H.full, ns.seed and ns.seed.t or 0)))
 end
 
 -- Gathering nodes go out one at a time, behind any price broadcast.
@@ -189,6 +195,10 @@ end
 
 -- --------------------------------------------------------------------------------------------------- receiving --
 local R = {}
+local PENDING = 900                                              -- an unfinished transfer is forgotten after this
+local function expire(now)
+    for k, r in pairs(R) do if now - r.at > PENDING then R[k] = nil end end
+end
 local function mine(sender)
     local n, r = UnitName("player")
     if UnitFullName then n, r = UnitFullName("player") end
@@ -197,37 +207,69 @@ local function mine(sender)
     return sn == n and (sr == "" or not r or r == "" or sr:gsub("[%s%-]", "") == r:gsub("[%s%-]", ""))
 end
 local function header(sender, ver, sid, t, n, chunks)
-    if ver ~= VER then return end
+    if ver ~= VER or not ns.sharedOK() then return end          -- a save from a newer version: nothing received
     local now = ns.now()
-    if not (whole(t, now + 120) and t > now - 86400 and whole(n, 50000) and n > 0 and whole(chunks, 2000) and chunks > 0 and chunks <= n) then return end
-    local L = ns.live()
+    if not (whole(t, now + AHEAD) and t >= now - BEHIND and whole(n, 50000) and n > 0 and whole(chunks, 2000) and chunks > 0 and chunks <= n) then return end
+    local L, H = ns.live(), ns.shared()
     if pending and t >= L.full then pending = nil end           -- someone else is already answering the request
-    for k, r in pairs(R) do if now - r.at > 900 then R[k] = nil end end
-    if t <= L.full then return end                               -- nothing newer than what is here
-    R[sender] = { sid = sid, t = t, n = n, chunks = chunks, got = {}, count = 0, items = 0, seen = {}, at = now }
+    expire(now)
+    if t <= math.max(L.full, H.full) then return end            -- nothing newer than what is here
+    held[H] = ns.pruneShared(H)                                  -- also drops entries older than 12 h
+    R[sender] = { sid = sid, t = t, n = n, chunks = chunks, got = {}, count = 0, items = 0, seen = {}, at = now, stage = {}, stored = 0 }
+    C_Timer.After(PENDING + 5, function() expire(ns.now()) end)  -- also when nobody sends anything more
 end
 local function chunk(sender, sid, seq, payload)
+    expire(ns.now())
     local r = R[sender]
     if not r or r.sid ~= sid or not whole(seq, r.chunks) or seq < 1 or r.got[seq] then return end
     local list = Y.decode(payload)
     if not list or r.items + #list / 3 > r.n then R[sender] = nil; return end
     r.got[seq] = true; r.count = r.count + 1
-    local L, t, seen = ns.live(), r.t, r.seen
+    local H, t, seen = ns.shared(), r.t, r.seen
+    local n = held[H] or 0
+    local name = sender:match("^[^-]+")
+    H.from[t] = name
     for i = 1, #list, 3 do
         local id = list[i]
-        if not seen[id] then seen[id] = true; r.items = r.items + 1 end
-        if (L.t[id] or 0) < t then L.p[id], L.q[id], L.t[id] = list[i + 1], list[i + 2], t end
+        if not seen[id] then                                     -- each item once per transfer, so the set-aside
+            seen[id] = true; r.items = r.items + 1               -- list never exceeds the declared item count
+            if H.p[id] == nil and n >= Y.MAXITEMS then         -- full: kept aside until the scan is complete
+                local st = r.stage
+                st[#st + 1] = id; st[#st + 1] = list[i + 1]; st[#st + 1] = list[i + 2]
+            elseif (H.t[id] or 0) < t then
+                if H.p[id] == nil then n = n + 1 end
+                H.p[id], H.q[id], H.t[id] = list[i + 1], list[i + 2], t
+                r.stored = r.stored + 1
+            end
+        end
     end
+    held[H] = n
     if r.count < r.chunks then return end
     R[sender] = nil
     if r.items ~= r.n then return end                            -- incomplete: keep what arrived, forget nothing
-    for id, it in pairs(L.t) do
-        if it < t and not seen[id] then L.p[id], L.q[id], L.t[id] = nil, nil, nil end
+    -- Complete and newer than the layer: it replaces the older entries (shared layer only; your own scans are never
+    -- touched), so junk from unfinished transfers cannot hold the cap. Items kept aside at the cap go in now.
+    for id, it in pairs(H.t) do
+        if it < t and not seen[id] then H.p[id], H.q[id], H.t[id] = nil, nil, nil; held[H] = held[H] - 1 end
     end
-    if t > L.full then L.full = t end
+    local st, complete = r.stage, true
+    for i = 1, #st, 3 do
+        local id = st[i]
+        if H.p[id] == nil and held[H] >= Y.MAXITEMS then complete = false
+        elseif (H.t[id] or 0) < t then
+            if H.p[id] == nil then held[H] = held[H] + 1 end
+            H.p[id], H.q[id], H.t[id] = st[i + 1], st[i + 2], t
+            r.stored = r.stored + 1
+        end
+    end
+    if complete and t > H.full then H.full = t end
+    local used = {}
+    for _, it in pairs(H.t) do used[it] = true end
+    for k in pairs(H.from) do if not used[k] then H.from[k] = nil end end
+    if r.stored == 0 then return end                             -- nothing of it could be kept: say nothing
     local DB = ns.db()
-    DB.syncFrom, DB.syncAt = sender:match("^[^-]+"), t
-    ns.say("prices updated from " .. DB.syncFrom .. "'s scan (" .. ns.age(t) .. "), " .. r.n .. " items.")
+    DB.syncFrom, DB.syncAt = name, t
+    ns.say("prices updated from " .. DB.syncFrom .. "'s scan (" .. ns.age(t) .. "), " .. r.stored .. " items.")
 end
 local function request(have)
     if out then if out.t > have then again = true end return end
@@ -235,12 +277,17 @@ local function request(have)
     if L.full <= have or ns.now() - L.full > 43200 then return end
     local tok = {}
     pending = tok
-    C_Timer.After(2 + math.random() * 8, function() if pending == tok and not out then Y.broadcast(true) end end)
+    -- Only your own scan is sent. When a guild member's newer scan is known here, its owner gets the first chance
+    -- to answer (seeing their reply cancels this one).
+    local wait = ns.shared().full > L.full and 12 or 2
+    C_Timer.After(wait + math.random() * 8, function() if pending == tok and not out then Y.broadcast(true) end end)
 end
 function Y.receive(prefix, text, channel, sender)
     if secret(prefix) or secret(text) or secret(channel) or secret(sender) then return end
     if prefix ~= PFX or channel ~= "GUILD" or type(text) ~= "string" or type(sender) ~= "string" or #text > 255 then return end
     if not ns.db() or not on() or mine(sender) then return end
+    local who = sender:match("^([^-]+)")
+    if not who or #who > 64 then return end                     -- no usable sender name
     local k = text:sub(1, 1)
     if k == "D" then
         local sid, seq, payload = text:match("^D(%d%d%d%d%d%d),(%d%d?%d?%d?),([%w+/]+)$")

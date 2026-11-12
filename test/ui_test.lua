@@ -244,7 +244,7 @@ do
     ok("drops show the scanned price and its listed count", d[1] and d[1].each == 50000000 * CUT and d[1].listed == 7, d[1] and (d[1].each .. " " .. d[1].listed))
     ok("best() uses the scanned price", F.best(nd[6][1], CUT) == 50000000 * CUT)
     S.tab = "mine"; UI:Refresh()
-    ok("the status line says newer scans count", UI.status:GetText():find("or your own newer scan", 1, true), UI.status:GetText())
+    ok("the status line says a newer price counts", UI.status:GetText():find("or the addon's newer price for the item", 1, true), UI.status:GetText())
     -- a scan older than the farm data does not override it
     L.t[ore[2]] = T - 60
     ok("an older scan leaves the ranking alone", snap() == base)
@@ -332,6 +332,12 @@ do
     SlashCmdList.AHPROFIT("bags")
     local S2 = AHProfitDB.farm
     ok("/ahp bags opens the bags tab", AHProfitFarmFrame:IsShown() and S2.tab == "bags")
+    ok("status without full scans names only the feed", plain(U.status:GetText()):find("^Prices: the feed from "), plain(U.status:GetText()))
+    if n2.shared then
+        local Hs = n2.shared(); Hs.full = W.time - 600; Lv.full = W.time - 1800; U:Refresh()
+        ok("status names your scan and the guild's separately", plain(U.status:GetText()):find("Prices: your scan 30m ago, a guild scan 10m ago, else the feed from ", 1, true), plain(U.status:GetText()))
+        Hs.full = 0; Lv.full = 0; U:Refresh()
+    else ok("status names your scan and the guild's separately", false, "no shared layer") end
     ok("bags headline", plain(U.head:GetText()):find("Auction 2 for 85s 50c, vendor the rest for 22s 50c: 32s 50c more than vendoring it all.", 1, true), plain(U.head:GetText()))
     ok("bags headline says one is loading", plain(U.head:GetText()):find("1 still loading", 1, true))
     ok("setup rows hidden on a tool tab", not U.boxes.lvMin:IsShown() and not U.checks.mining:IsShown() and U.intro:GetText() ~= "")
@@ -462,6 +468,22 @@ do
         ok("deals head counts them", plain(U.head:GetText()):find("below vendor price", 1, true), U.head:GetText())
         price(900002, was, 9)
         price(900001, 600, 50)                                   -- the history test above removed its price
+        -- a dip from your own daily history says where its usual price comes from
+        local Hh = n2.histHouse and n2.histHouse()
+        if Hh then
+            local sd = n2.scanDay(W.time)
+            Hh[900001] = n2.histEncode({ { sd - 4, 2000, 0, 1 }, { sd - 3, 2000, 0, 1 }, { sd - 2, 2000, 0, 1 }, { sd - 1, 2000, 0, 1 }, { sd, 2000, 0, 1 } })
+            if n2.histChanged then n2.histChanged() end
+            U.tabs.deals.scripts.OnClick[1]()
+            local dipE
+            for _, e in ipairs(U.entries) do if e.left == "Test Ore" then dipE = e end end
+            local dl = dipE and dipE.detail() or {}
+            local txt = plain(table.concat(dl, "\n"))
+            ok("own-history dip detail names its source", txt:find("over 5 days, from your own scans", 1, true), txt)
+            ok("own-history dip detail does not promise a graph of your own prices", not txt:find("shows its graph", 1, true), txt)
+            Hh[900001] = nil
+            if n2.histChanged then n2.histChanged() end
+        else ok("own-history dip detail names its source", false, "no history") end
         AHProfitDB.auc = { own = { [X.me()] = { t = W.time, list = { { 900001, 10, 700, 0 }, { 900003, 1, 900, 1 } } } } }
         U.tabs.auc.scripts.OnClick[1]()
         ok("auctions tab lists own auctions, sold first", #U.entries == 2 and U.entries[1].left == "Half Bound Sword" and U.entries[1].sub == "sold, gold waiting" and U.entries[2].sub == "someone is cheaper", #U.entries)

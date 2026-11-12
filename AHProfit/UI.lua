@@ -199,7 +199,7 @@ local function bagRows(out, rows, C, where)
             detail = function()
                 local L = { "|cffffd100" .. r.name .. "|r  " .. (ah and ("auction " .. r.free .. (r.bound > 0 and (", vendor the " .. r.bound .. " soulbound") or "")) or ("vendor all " .. r.n)) }
                 if r.price then
-                    L[#L + 1] = "AH lowest (" .. (r.src == "scan" and "scan " or "feed ") .. ns.age(r.t) .. "): " .. coin(r.price) .. " each, " .. (r.qty or 0) .. " listed"
+                    L[#L + 1] = "AH lowest (" .. ns.srcLabel(r.src, r.t, r.from) .. "): " .. coin(r.price) .. " each, " .. (r.qty or 0) .. " listed"
                     L[#L + 1] = "After " .. C .. "% cut: " .. coin(r.net) .. " each. A vendor pays " .. coin(r.vendor) .. " each."
                 else
                     L[#L + 1] = "No auction listings seen. A vendor pays " .. coin(r.vendor) .. " each."
@@ -302,7 +302,7 @@ local function histEntries()
 end
 
 -- ------------------------------------------------------------------------- deals, known recipes, own auctions --
-local function fresh(src, t) return (src == "scan" and "scan " or "feed ") .. ns.age(t) end
+local function fresh(src, t, from) return ns.srcLabel(src, t, from) end
 local function dealEntries()
     local out = {}
     if not X then return out end
@@ -313,7 +313,7 @@ local function dealEntries()
             out[#out + 1] = { left = d.name, sub = "below vendor price, " .. d.qty .. " listed", right = "|cff40ff40+" .. coin(d.gain) .. "|r each", v = d.gain,
                 detail = function()
                     return { "|cffffd100" .. d.name .. "|r  buy it on the auction house, sell it to a vendor",
-                        "AH lowest (" .. fresh(d.src, d.t) .. "): " .. coin(d.price) .. " each, " .. d.qty .. " listed",
+                        "AH lowest (" .. fresh(d.src, d.t, d.from) .. "): " .. coin(d.price) .. " each, " .. d.qty .. " listed",
                         "A vendor pays " .. coin(d.vendor) .. " each: |cff40ff40+" .. coin(d.gain) .. "|r per unit, with no auction cut and no deposit.",
                         grey("Only the cheapest listing is known to be this low; the next one may cost more. Check the price before you buy."),
                         grey("A price from the feed can be up to an hour old, and someone else may have bought it. Nothing is bought for you.") }
@@ -322,9 +322,9 @@ local function dealEntries()
             out[#out + 1] = { left = d.name, sub = pct(d.below) .. " under its usual price", right = coin(d.price), v = d.below,
                 detail = function()
                     return { "|cffffd100" .. d.name .. "|r  cheaper than usual",
-                        "AH lowest now (" .. fresh(d.src, d.t) .. "): " .. coin(d.price) .. " each, " .. d.qty .. " listed",
-                        "Usual price: " .. coin(d.usual) .. grey("  the middle of its daily prices over " .. d.days .. " days"),
-                        "That is " .. pct(d.below) .. " lower. The Prices tab shows its graph.",
+                        "AH lowest now (" .. fresh(d.src, d.t, d.from) .. "): " .. coin(d.price) .. " each, " .. d.qty .. " listed",
+                        "Usual price: " .. coin(d.usual) .. grey("  the middle of its daily prices over " .. d.days .. " days" .. (d.own and ", from your own scans" or ", from the bundled price feed")),
+                        "That is " .. pct(d.below) .. " lower." .. (d.own and "" or " The Prices tab shows its graph."),
                         grey("A low price can stay low. This is not a promise that it rises again.") }
                 end }
         end
@@ -340,7 +340,7 @@ local function recEntries()
         out[#out + 1] = { left = r.name .. (r.makes ~= 1 and (" x" .. (r.lo == r.hi and r.lo or (r.lo .. "-" .. r.hi))) or ""), sub = r.prof, right = right, v = r.profit or 0, dim = r.profit == nil,
             detail = function()
                 local L = { "|cffffd100" .. r.name .. "|r  " .. grey(r.prof ~= "" and r.prof or "profession") }
-                if r.how == "ah" then L[#L + 1] = "Sells for " .. coin(r.value) .. " on the AH after the " .. C .. "% cut" .. grey("  " .. coin(r.price) .. " each, " .. r.listed .. " listed, " .. fresh(r.src, r.t))
+                if r.how == "ah" then L[#L + 1] = "Sells for " .. coin(r.value) .. " on the AH after the " .. C .. "% cut" .. grey("  " .. coin(r.price) .. " each, " .. r.listed .. " listed, " .. fresh(r.src, r.t, r.from))
                 elseif r.how == "vendor" then L[#L + 1] = "Sells for " .. coin(r.value) .. " at a vendor" .. grey("  no auction listing pays more")
                 else L[#L + 1] = "What it makes has no auction listing and no vendor value." end
                 L[#L + 1] = "Materials:"
@@ -370,7 +370,7 @@ local function aucEntries()
                 local L = { "|cffffd100" .. r.name .. "|r  " .. (r.sold and "sold" or "listed") .. ", " .. r.q .. " at " .. coin(r.each) .. " each" }
                 L[#L + 1] = (r.sold and "You receive " or "If all of it sells you receive ") .. coin(r.net) .. " after the " .. C .. "% cut."
                 if r.low and not r.sold then
-                    L[#L + 1] = "Lowest listing now (" .. fresh(r.src, r.lowT) .. "): " .. coin(r.low) .. (r.under and "  |cffff5050below yours|r" or "")
+                    L[#L + 1] = "Lowest listing now (" .. fresh(r.src, r.lowT, r.from) .. "): " .. coin(r.low) .. (r.under and "  |cffff5050below yours|r" or "")
                 end
                 if r.soldN then
                     local n = r.soldN + r.expiredN
@@ -408,7 +408,7 @@ function UI:DrawGraph()
             or "Price history is missing. Run the updater, then /reload.")
         return
     end
-    local now, _, nowT, src = ns.lookup(s.id)
+    local now, _, nowT, src, from = ns.lookup(s.id)
     local pts = {}
     for i, p in ipairs(s.pts) do pts[i] = p end
     local last = pts[#pts]
@@ -416,7 +416,7 @@ function UI:DrawGraph()
     local cur = now or (last and last.p) or s.day1p
     local pc, diff, col = change(cur, s.day1p)
     local lo, hi = math.min(s.lo, cur), math.max(s.hi, cur)
-    g.text:SetText("|cffffd100" .. s.name .. "|r  " .. (now and ("now " .. coin(now) .. grey(" (" .. (src == "scan" and "scan " or "feed ") .. ns.age(nowT) .. ")")) or ("not listed now, last seen at " .. coin(cur)))
+    g.text:SetText("|cffffd100" .. s.name .. "|r  " .. (now and ("now " .. coin(now) .. grey(" (" .. ns.srcLabel(src, nowT, from) .. ")")) or ("not listed now, last seen at " .. coin(cur)))
         .. "\nDay 1 (" .. Tl.dayText(s.day1) .. "): " .. coin(s.day1p) .. "     Since day 1: " .. col .. (diff >= 0 and "+" or "") .. coin(diff) .. "|r  " .. pc
         .. "\n" .. grey("Lowest " .. coin(lo) .. ", highest " .. coin(hi) .. " over " .. #s.pts .. (#s.pts == 1 and " day" or " days") .. " with listings. Each day is the middle of that day's hourly lowest asking price."))
     self.graphInfo = { now = now, cur = cur, diff = diff, lo = lo, hi = hi, n = #pts }
@@ -790,13 +790,15 @@ function UI:Refresh()
     local C = (AHProfitDB and AHProfitDB.cut) or 5
     if farmTab then
         local t = F.time()
-        self.status:SetText("Auction prices from " .. date("%a %H:%M", t) .. " (" .. ns.age(t) .. "), or your own newer scan, " .. C .. "% cut taken off. Asking prices, not completed sales.")
+        self.status:SetText("Auction prices from " .. date("%a %H:%M", t) .. " (" .. ns.age(t) .. "), or the addon's newer price for the item, " .. C .. "% cut taken off. Asking prices, not completed sales.")
     elseif S.tab == "hist" then
         local t = Tl.histTime()
         self.status:SetText(t and ("Price history up to " .. date("%a %H:%M", t) .. " (" .. ns.age(t) .. "). One point per day, from the hourly price feed.") or "Price history is missing. Run the updater, then /reload.")
     else
-        local L = ns.live()
-        self.status:SetText("Prices: " .. (L.full > 0 and ("your or a guild scan " .. ns.age(L.full) .. ", else ") or "") .. (ns.seed and ("the feed from " .. ns.age(ns.seed.t)) or "no feed") .. ". " .. C .. "% cut taken off.")
+        local L, H = ns.live(), ns.shared()
+        local own = L.full > 0 and ("your scan " .. ns.age(L.full) .. ", ") or ""
+        local gld = H.full > 0 and ("a guild scan " .. ns.age(H.full) .. ", ") or ""
+        self.status:SetText("Prices: " .. own .. gld .. ((own ~= "" or gld ~= "") and "else " or "") .. (ns.seed and ("the feed from " .. ns.age(ns.seed.t)) or "no feed") .. ". " .. C .. "% cut taken off.")
     end
     local list = self:Entries()
     self.entries = list

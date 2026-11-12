@@ -13,7 +13,7 @@ The profit line is green with a `+` when the auction house pays more than the ve
 ## Where prices come from
 
 - **Your own scan.** The addon scans the auction house when you open it (at most every 15 minutes), or when you type `/ahp scan`. The scan stands still while you are on a Sell tab or hold an item, so it does not get in the way of posting.
-- **Your guild.** When a guild member with the addon finishes a full scan, the prices reach everyone else in the guild who runs it, with no reload.
+- **Your guild.** When a guild member with the addon finishes a full scan, the prices reach everyone else in the guild who runs it, with no reload. They are kept apart from your own scans and never change or delete them; the tooltip says `guild (Name, 20m ago)`. Your own scan wins while it is under 2 hours old.
 - **The bundled snapshot.** `Data.lua` holds one snapshot of Blizzard's auction feed for the **EU PvP Alliance** house, taken when the release was built. It is used only for Alliance characters and only until a newer scan exists. On any other realm group it is wrong: scan once and it is replaced.
 
 Each tooltip says which source the price is from and how old it is.
@@ -27,7 +27,7 @@ Treat guild-shared and bundled prices as estimates: only your own recent scan re
 | `/ahp` | Status |
 | `/ahp farm` | Gold farming window: gathering, mobs, fishing and crafting ranked for your level and professions, with map pins |
 | `/ahp bags` | What to auction and what to vendor from your bags and bank |
-| `/ahp deals` | Auctions below vendor price, and materials well under their usual price |
+| `/ahp deals` | Auctions below vendor price, and items well under their usual price (from your own scans once they cover 5 days, else the bundled history) |
 | `/ahp recipes` | Profit per craft for the recipes you know |
 | `/ahp auctions` | Your own auctions: what you get if they sell, who is undercut |
 | `/ahp session` | Measured coin and items for a farming session |
@@ -48,8 +48,8 @@ The addon never buys, sells, lists or moves anything.
 
 ## Limits
 
-- Guild-shared prices are taken as sent: the addon cannot tell a real scan from made-up numbers.
-- The farm window's drop data and the price history are a snapshot from the release, for Alliance. Its auction prices are the snapshot's too, except for items you have scanned since: those use your newer price.
+- Guild-shared prices are taken as sent: the addon cannot tell a real scan from made-up numbers. Scans timed more than 5 minutes ahead of your clock or more than 12 hours old are refused, received prices older than 12 hours are dropped at the next received scan or reload, and only your own scans are ever passed on.
+- The farm window's drop data and the price history are a snapshot from the release, for Alliance. Its auction prices are the snapshot's too, except for items where the addon's own price for the item (your scan, a guild member's or the bundled feed, as the tooltip shows it) is newer: those use it. Your own scans also keep a daily history (21 days, up to 10,000 items per auction house) that the deals use first; it is stored compactly (one short string per item), about 1 MB for a house of 6,000 items scanned in full every day.
 - Tested against a mock game client only (see below).
 
 ## Tests
