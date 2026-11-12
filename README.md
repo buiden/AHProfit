@@ -49,7 +49,7 @@ The addon never buys, sells, lists or moves anything.
 ## Limits
 
 - Guild-shared prices are taken as sent: the addon cannot tell a real scan from made-up numbers. Scans timed more than 5 minutes ahead of your clock or more than 12 hours old are refused, received prices are dropped once they are 12 hours old, and only your own scans are ever passed on.
-- The farm window's drop data and the price history are a snapshot from the release, for Alliance. Its auction prices are the snapshot's too, except for items you have scanned since: those use your newer price.
+- The farm window's drop data and the price history are a snapshot from the release, for Alliance. Its auction prices are the snapshot's too, except for items with a newer price since (your scan or a guild member's): those use it.
 - Tested against a mock game client only (see below).
 
 ## Tests
