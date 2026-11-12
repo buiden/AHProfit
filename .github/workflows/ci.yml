@@ -5,6 +5,7 @@ on:
     branches: [main]
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -18,13 +19,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install Lua 5.1
-        run: sudo apt-get update -q && sudo -S -p '' apt-get install -y -q lua5.1
-      - name: Syntax check
-        run: for f in AHProfit/*.lua test/*.lua; do luac5.1 -p "$f"; done
-      - name: Tests
-        run: |
-          for t in test/harness.lua test/extra_test.lua test/sync_test.lua test/ui_test.lua; do
-            echo "== $t"
-            lua5.1 "$t"
-          done
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+      - name: Install pinned Lua 5.1 runtime
+        run: python -m pip install --disable-pip-version-check -r .github/requirements-ci.txt
+      - name: Syntax check and tests
+        run: python -I -B .github/run_lua_tests.py

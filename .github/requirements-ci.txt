@@ -1,0 +1,2 @@
+# Lua 5.1 runtime for the offline tests; product source and tests remain unchanged.
+lupa==2.8
