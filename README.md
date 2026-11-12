@@ -40,6 +40,16 @@ Treat guild-shared and bundled prices as estimates: only your own recent scan re
 
 The addon never buys, sells, lists or moves anything.
 
+It also keeps, in its saved variables, records for tools outside the game (the Relax Coach Farming page reads them):
+
+- **Gold ledger:** per character and day, the money in and out by source (vendor, repair, auction house, mail, trade,
+  trainer, flight, quest, loot, other), taken from the change of your money and the window that was open. 180 days, up
+  to 50 characters. Days are UTC days, like the price history.
+- **Sessions:** each farming session you stop with `/ahp session stop` (or the Stop button): character, zone where it
+  started, time, coin by source, the items gained and used, nodes gathered. The last 100.
+- **Item names:** the name and vendor price of the items in your bank, your auctions and your sessions, once the game
+  has loaded them. Up to 5,000 items.
+
 ## Install
 
 1. Download `AHProfit-x.y.z.zip` from the latest release.
@@ -57,7 +67,7 @@ The addon never buys, sells, lists or moves anything.
 Lua 5.1, from the repository root:
 
 ```sh
-for t in harness ui_test sync_test extra_test; do lua5.1 test/$t.lua; done
+for t in harness ui_test sync_test extra_test ledger_test; do lua5.1 test/$t.lua; done
 ```
 
 ## License

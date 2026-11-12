@@ -123,6 +123,7 @@ do
     fire(a, "BANKFRAME_CLOSED"); a.bag[6] = {}; a.bag[7] = {}; fire(a, "BAG_UPDATE_DELAYED")
     ok("closed bank keeps what was last seen", #as(a).bank() == 4)
     local rows = a.ns.tools.advise(as(a).bank(), 5)
+    ok("bank items are named in the item cache", a.db.items[2840] and a.db.items[2840][1] == "Copper Bar" and a.db.items[100][2] == 13)
     ok("bank list works with the bag advisor", type(rows) == "table")
     ok("another character's bank is separate", as(b).bank() == nil)
     b.tabs = {}; BANK_CONTAINER, NUM_BAG_SLOTS, NUM_BANKBAGSLOTS = -1, 4, 2
@@ -326,6 +327,7 @@ do
     fire(a, "OWNED_AUCTIONS_UPDATED")
     local rows, tot = as(a).auctions(5)
     ok("auctions read", rows and #rows == 4, rows and #rows)
+    ok("auction items are named in the item cache", a.db.items[201] and a.db.items[201][1] == "Rough Stone Statue")
     ok("sold first, and not counted as still asking", rows[1].id == 201 and rows[1].sold and rows[1].net == 475 and tot.soldN == 1)
     ok("asking total is after the cut and only what is unsold", tot.n == 3 and tot.asking == 1140 * 2 + 38 * 10, tot.asking)
     local by = {}

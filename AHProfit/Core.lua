@@ -43,12 +43,14 @@ local function live()
 end
 ns.live = live
 
--- Saved-data version (DB.v): 1 added DB.shared (guild prices), 2 added DB.hist (daily history of your own scans).
+-- Saved-data version (DB.v): 1 added DB.shared (guild prices), 2 added DB.hist (daily history of your own scans),
+-- 3 added DB.ledger (daily money per character and source), DB.sessions (finished farming sessions) and DB.items
+-- (item names and vendor prices, Tools.lua).
 -- A save written by a newer version (DB.v > KNOWN_V) is left untouched; this version then uses neither layer, and
 -- neither stores nor shows received prices (ns.sharedOK() is false; Sync.lua refuses them).
 -- Prices received from guild members (Sync.lua) live in their own layer, one per auction house: they never change
 -- or delete your own scans. from = { [scan time] = sender name }. Received prices older than 12 hours are dropped.
-local KNOWN_V, MAX_HOUSES, SHARED_KEEP = 2, 8, 43200
+local KNOWN_V, MAX_HOUSES, SHARED_KEEP = 3, 8, 43200
 local spare = { p = {}, q = {}, t = {}, full = 0, from = {} }
 local function shared()
     if DB.v ~= KNOWN_V then return spare end
@@ -79,6 +81,9 @@ local function loadShared()
     local v = type(DB.v) == "number" and DB.v or 0
     if v < 1 or type(DB.shared) ~= "table" then DB.shared = {} end
     if v < 2 or type(DB.hist) ~= "table" then DB.hist = {} end
+    for _, k in ipairs({ "ledger", "sessions", "items" }) do
+        if v < 3 or type(DB[k]) ~= "table" then DB[k] = {} end
+    end
     DB.v = KNOWN_V
     loadHist()
     local keys = {}
@@ -544,7 +549,7 @@ f:SetScript("OnEvent", function(_, ev, a1)
         loadShared()
         f:RegisterEvent("PLAYER_LOGOUT")
         if ns.tools then
-            for _, e in ipairs(ns.tools.events) do f:RegisterEvent(e) end
+            for _, e in ipairs(ns.tools.events) do pcall(f.RegisterEvent, f, e) end   -- an event this client lacks is skipped
             ns.tools.init()
         end
         if TooltipDataProcessor and Enum and Enum.TooltipDataType then

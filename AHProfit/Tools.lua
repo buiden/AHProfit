@@ -143,6 +143,7 @@ end
 local lastMoney
 local grace = 0
 local function sess() local D = ns.db(); return D and D.session end
+local onLedger                                                   -- the daily money ledger, below
 local function place()
     if ctx.vendor then return "vendor" end
     if ctx.mail then return "mail" end
@@ -150,7 +151,7 @@ local function place()
     if ctx.trade then return "trade" end
     return "loot"
 end
-local function neutral() return next(ctx) ~= nil or ns.now() <= grace end
+local function neutral() return ctx.vendor or ctx.mail or ctx.ah or ctx.trade or ctx.bank or ns.now() <= grace end
 local function counts(items)
     local c = {}
     for id, it in pairs(items) do c[id] = it.n end
@@ -163,6 +164,7 @@ function T.sessionStart()
     local _, items = T.bags()
     local t = ns.now()
     D.session = { on = true, acc = 0, at = t, started = t, inc = {}, out = {}, net = {}, cur = counts(items or {}), bags = items ~= nil }
+    T.where(D.session)
     local m = GetMoney and GetMoney()
     lastMoney = num(m) and m or nil
     return true
@@ -171,15 +173,19 @@ function T.sessionStop()
     local S = sess()
     if not (S and S.on) then return false end
     S.acc, S.on = S.acc + math.max(0, ns.now() - S.at), false
+    T.archive(S)
     return true
 end
 local function onMoney()
     local m = GetMoney and GetMoney()
     if not num(m) then return end
     local S = sess()
-    if S and S.on and lastMoney then
+    if lastMoney then
         local d, c = m - lastMoney, place()
-        if d > 0 then S.inc[c] = (S.inc[c] or 0) + d elseif d < 0 then S.out[c] = (S.out[c] or 0) - d end
+        if S and S.on then
+            if d > 0 then S.inc[c] = (S.inc[c] or 0) + d elseif d < 0 then S.out[c] = (S.out[c] or 0) - d end
+        end
+        if d ~= 0 then onLedger(d) end
     end
     lastMoney = m
 end
@@ -229,28 +235,251 @@ function T.sessionReport(cutPct)
     return R
 end
 
+-- ------------------------------------------------------------------------------------ money ledger (DB.v 3) --
+-- DB.ledger[char][day][source] = { in, out }: copper per character ("Name-Realm"), day (UTC days since 2020-01-01,
+-- like the price history) and source, from the change of the money counter only. The source is the window that is
+-- open (or was closed a moment ago); with none, money coming in is "loot" and money going out is "other".
+-- Kept 180 days, at most 50 characters. A save from a newer version is not written (ns.sharedOK() is false).
+local LEDGER_DAYS, LEDGER_CHARS, SESSIONS, ITEMS = 180, 50, 100, 5000
+T.LEDGER_DAYS, T.LEDGER_CHARS, T.SESSIONS, T.ITEMS = LEDGER_DAYS, LEDGER_CHARS, SESSIONS, ITEMS
+local SOURCES = { vendor = true, repair = true, ah = true, mail = true, trade = true, trainer = true, taxi = true, quest = true,
+    loot = true, other = true }
+T.SOURCES = SOURCES
+local MAXC = 1e12
+local function okNum(v, max) return num(v) and v >= 0 and v <= max and v == math.floor(v) end
+local function me()
+    local n, r = UnitName and UnitName("player"), GetRealmName and GetRealmName()
+    if type(n) ~= "string" or secret(n) or n == "" or type(r) ~= "string" or secret(r) or r == "" then return nil end
+    return n .. "-" .. r
+end
+local function writable() local D = ns.db(); return D and ns.sharedOK and ns.sharedOK() and type(D.ledger) == "table" and D or nil end
+local recent = {}                  -- source -> until when a just-closed window or a just-made call still counts
+local lastClosed
+local function soon(src, sec) recent[src] = ns.now() + (sec or 2) end
+local function within(src) return recent[src] ~= nil and ns.now() <= recent[src] end
+local function ledgerSource(d)
+    if d < 0 and ((InRepairMode and InRepairMode() == true) or within("repair")) then return "repair" end
+    if ctx.vendor then return "vendor" end
+    if ctx.ah then return "ah" end
+    if ctx.mail then return (d > 0 and within("mailah")) and "ah" or "mail" end   -- money from an auction invoice
+    if ctx.trade then return "trade" end
+    if ctx.trainer then return "trainer" end
+    if ctx.taxi or within("taxi") then return "taxi" end
+    if ctx.quest or within("quest") then return "quest" end
+    if lastClosed and ns.now() <= grace then
+        if lastClosed == "mail" and d > 0 and within("mailah") then return "ah" end
+        if SOURCES[lastClosed] then return lastClosed end
+    end
+    return d > 0 and "loot" or "other"
+end
+T.ledgerSource = ledgerSource
+-- Drops days older than LEDGER_DAYS from one character's ledger; returns its newest day (or nil when empty).
+local function pruneChar(C, today)
+    local newest
+    for day in pairs(C) do
+        if day <= today - LEDGER_DAYS then C[day] = nil
+        elseif not newest or day > newest then newest = day end
+    end
+    return newest
+end
+local function trimChars(L, today, keep)
+    local list = {}
+    for k, C in pairs(L) do
+        local newest = pruneChar(C, today)
+        if newest then list[#list + 1] = { k, newest } else L[k] = nil end
+    end
+    if #list <= LEDGER_CHARS then return end
+    table.sort(list, function(a, b) if a[1] == keep then return true elseif b[1] == keep then return false end
+        if a[2] ~= b[2] then return a[2] > b[2] end return a[1] < b[1] end)
+    for i = LEDGER_CHARS + 1, #list do L[list[i][1]] = nil end
+end
+onLedger = function(d)
+    local D, k = writable(), me()
+    if not (D and k) then return end
+    local today = ns.scanDay(ns.now())
+    local C = D.ledger[k]
+    local new = not C
+    if new then C = {}; D.ledger[k] = C end
+    local day = C[today]
+    if not day then day = {}; C[today] = day; pruneChar(C, today) end
+    if new then trimChars(D.ledger, today, k) end                -- after the day exists, so the new character counts
+    local src = ledgerSource(d)
+    local e = day[src]
+    if not e then e = { 0, 0 }; day[src] = e end
+    if d > 0 then e[1] = math.min(MAXC, e[1] + d) else e[2] = math.min(MAXC, e[2] - d) end
+end
+
+-- ------------------------------------------------------------------------------------------ session archive --
+-- A finished session is kept in DB.sessions (the newest SESSIONS): who, where it started, when, coin by source
+-- and the items gained or used (the 30 largest changes; value them with today's prices).
+local function copySide(t)
+    local out = {}
+    for c, v in pairs(t or {}) do if type(c) == "string" and #c <= 16 and okNum(v, MAXC) and v > 0 then out[c] = v end end
+    return out
+end
+function T.where(S)
+    local m = C_Map and C_Map.GetBestMapForUnit and C_Map.GetBestMapForUnit("player")
+    if okNum(m, 1e7) then S.map = m end
+    local z = GetZoneText and GetZoneText()
+    if type(z) == "string" and not secret(z) and z ~= "" and #z <= 80 then S.zone = z end
+end
+function T.archive(S)
+    local D = writable()
+    if not D then return end
+    local n, r = UnitName and UnitName("player"), GetRealmName and GetRealmName()
+    local f, lvl = UnitFactionGroup and UnitFactionGroup("player"), UnitLevel and UnitLevel("player")
+    local items, list = {}, {}
+    for id, q in pairs(S.net or {}) do if okNum(id, 1e7) and num(q) and q ~= 0 and q == math.floor(q) then list[#list + 1] = { id, q } end end
+    table.sort(list, function(a, b) local x, y = math.abs(a[2]), math.abs(b[2]); if x ~= y then return x > y end return a[1] < b[1] end)
+    for i = 1, math.min(30, #list) do items[i] = list[i] end
+    if S.map == nil and S.zone == nil then T.where(S) end
+    local rec = { char = (type(n) == "string" and not secret(n)) and n or nil, realm = (type(r) == "string" and not secret(r)) and r or nil,
+        faction = (type(f) == "string" and not secret(f)) and f or nil, level = okNum(lvl, 1000) and lvl or nil,
+        map = S.map, zone = S.zone, start = S.started, stop = ns.now(), dur = S.acc, inc = copySide(S.inc), out = copySide(S.out),
+        items = items, nodes = okNum(S.nodes, 1e6) and S.nodes or 0 }
+    local A = D.sessions
+    A[#A + 1] = rec
+    while #A > SESSIONS do table.remove(A, 1) end
+    T.noteItems((function() local ids = {}; for i, x in ipairs(items) do ids[i] = x[1] end return ids end)())
+end
+
+-- ---------------------------------------------------------------------------------------------- item cache --
+-- DB.items[id] = { name, vendor price, time last seen }, for the items in your bank, your auctions and your
+-- sessions, so tools outside the game can name them. Only what the client has loaded is stored; the rest is asked
+-- for and tried again at logout. At most ITEMS, the least recently seen dropped first.
+local missing = {}
+function T.noteItems(ids)
+    local D = writable()
+    if not (D and type(D.items) == "table") then return end
+    local I, t, added = D.items, ns.now(), false
+    for i = 1, math.min(#ids, 2000) do
+        local id = ids[i]
+        if okNum(id, 1e7) and id > 0 then
+            local name, vendor = info(id)
+            if type(name) == "string" and name ~= "" and #name <= 200 and okNum(vendor, 1e10) then
+                local e = I[id]
+                if e then e[1], e[2], e[3] = name, vendor, t else I[id] = { name, vendor, t }; added = true end
+                missing[id] = nil
+            else
+                missing[id] = true
+                if C_Item and C_Item.RequestLoadItemDataByID then pcall(C_Item.RequestLoadItemDataByID, id) end
+            end
+        end
+    end
+    if added then
+        local list = {}
+        for id, e in pairs(I) do list[#list + 1] = { id, e[3] } end
+        if #list > ITEMS then
+            table.sort(list, function(a, b) if a[2] ~= b[2] then return a[2] < b[2] end return a[1] < b[1] end)
+            for k = 1, #list - ITEMS do I[list[k][1]] = nil end
+        end
+    end
+end
+-- The items of this character's bank, auctions and running session, and those still missing.
+local function noteMine()
+    local D, k = ns.db(), me()
+    if not (D and k) then return end
+    local ids, seen = {}, {}
+    local function add(id) if not seen[id] then seen[id] = true; ids[#ids + 1] = id end end
+    local b = type(D.bank) == "table" and D.bank[k]
+    if type(b) == "table" and type(b.items) == "table" then for _, it in ipairs(b.items) do if type(it) == "table" then add(it[1]) end end end
+    local o = type(D.auc) == "table" and type(D.auc.own) == "table" and D.auc.own[k]
+    if type(o) == "table" and type(o.list) == "table" then for _, it in ipairs(o.list) do if type(it) == "table" then add(it[1]) end end end
+    local S = sess()
+    if S and type(S.net) == "table" then for id in pairs(S.net) do add(id) end end
+    for id in pairs(missing) do add(id) end
+    T.noteItems(ids)
+end
+T.noteMine = noteMine
+
+-- Checks the v3 tables at load: wrong types and out-of-range values are dropped, the caps applied.
+local function loadV3()
+    local D = writable()
+    if not D then return end
+    local today = ns.scanDay(ns.now())
+    for k, C in pairs(D.ledger) do
+        if type(k) ~= "string" or #k > 80 or type(C) ~= "table" then D.ledger[k] = nil
+        else
+            for day, srcs in pairs(C) do
+                if not okNum(day, 1e5) or type(srcs) ~= "table" then C[day] = nil
+                else
+                    for s, e in pairs(srcs) do
+                        if not (SOURCES[s] and type(e) == "table" and okNum(e[1], MAXC) and okNum(e[2], MAXC)) then srcs[s] = nil end
+                    end
+                    if next(srcs) == nil then C[day] = nil end
+                end
+            end
+        end
+    end
+    trimChars(D.ledger, today)
+    local A, keep = D.sessions, {}
+    for i = 1, #A do
+        local s = A[i]
+        if type(s) == "table" and okNum(s.start, 1e10) and okNum(s.stop, 1e10) and okNum(s.dur, 1e9) and type(s.inc) == "table"
+            and type(s.out) == "table" and type(s.items) == "table" then
+            s.inc, s.out = copySide(s.inc), copySide(s.out)
+            keep[#keep + 1] = s
+        end
+    end
+    while #keep > SESSIONS do table.remove(keep, 1) end
+    D.sessions = keep
+    local n, list = 0, {}
+    for id, e in pairs(D.items) do
+        if not (okNum(id, 1e7) and type(e) == "table" and type(e[1]) == "string" and e[1] ~= "" and #e[1] <= 200
+            and okNum(e[2], 1e10) and okNum(e[3], 1e10)) then D.items[id] = nil
+        else n = n + 1; list[n] = { id, e[3] } end
+    end
+    if n > ITEMS then
+        table.sort(list, function(a, b) if a[2] ~= b[2] then return a[2] < b[2] end return a[1] < b[1] end)
+        for k = 1, n - ITEMS do D.items[list[k][1]] = nil end
+    end
+end
+
 -- ------------------------------------------------------------------------------------------------- events --
 -- Core.lua owns the event frame and forwards these.
 T.events = { "PLAYER_ENTERING_WORLD", "PLAYER_MONEY", "BAG_UPDATE_DELAYED", "PLAYER_LOGOUT", "MERCHANT_SHOW", "MERCHANT_CLOSED",
-    "MAIL_SHOW", "MAIL_CLOSED", "TRADE_SHOW", "TRADE_CLOSED", "BANKFRAME_OPENED", "BANKFRAME_CLOSED", "AUCTION_HOUSE_SHOW", "AUCTION_HOUSE_CLOSED" }
-local OPEN = { MERCHANT_SHOW = "vendor", MAIL_SHOW = "mail", TRADE_SHOW = "trade", BANKFRAME_OPENED = "bank", AUCTION_HOUSE_SHOW = "ah" }
-local CLOSE = { MERCHANT_CLOSED = "vendor", MAIL_CLOSED = "mail", TRADE_CLOSED = "trade", BANKFRAME_CLOSED = "bank", AUCTION_HOUSE_CLOSED = "ah" }
+    "MAIL_SHOW", "MAIL_CLOSED", "TRADE_SHOW", "TRADE_CLOSED", "BANKFRAME_OPENED", "BANKFRAME_CLOSED", "AUCTION_HOUSE_SHOW", "AUCTION_HOUSE_CLOSED",
+    "TRAINER_SHOW", "TRAINER_CLOSED", "TAXIMAP_OPENED", "TAXIMAP_CLOSED", "QUEST_COMPLETE", "QUEST_FINISHED", "QUEST_TURNED_IN" }
+local OPEN = { MERCHANT_SHOW = "vendor", MAIL_SHOW = "mail", TRADE_SHOW = "trade", BANKFRAME_OPENED = "bank", AUCTION_HOUSE_SHOW = "ah",
+    TRAINER_SHOW = "trainer", TAXIMAP_OPENED = "taxi", QUEST_COMPLETE = "quest" }
+local CLOSE = { MERCHANT_CLOSED = "vendor", MAIL_CLOSED = "mail", TRADE_CLOSED = "trade", BANKFRAME_CLOSED = "bank", AUCTION_HOUSE_CLOSED = "ah",
+    TRAINER_CLOSED = "trainer", TAXIMAP_CLOSED = "taxi", QUEST_FINISHED = "quest" }
+-- The only calls watched: repairing, taking a flight, taking money from a mail. Nothing is called, only noted.
+local hooked = false
+local function hooks()
+    if hooked or not hooksecurefunc then return end
+    hooked = true
+    if RepairAllItems then hooksecurefunc("RepairAllItems", function() soon("repair") end) end
+    if TakeTaxiNode then hooksecurefunc("TakeTaxiNode", function() soon("taxi", 3) end) end
+    local function mail(i)
+        local ok, kind = pcall(function() return GetInboxInvoiceInfo and GetInboxInvoiceInfo(i) end)
+        if ok and kind == "seller" and not secret(kind) then soon("mailah") else recent.mailah = nil end
+    end
+    if TakeInboxMoney then hooksecurefunc("TakeInboxMoney", mail) end
+    if AutoLootMailItem then hooksecurefunc("AutoLootMailItem", mail) end
+end
 function T.init()
     local S = sess()
     if S and S.on then S.at = ns.now() end                       -- time spent logged out is not farming time
+    loadV3()
+    hooks()
 end
 function T.event(ev)
     if OPEN[ev] then
         ctx[OPEN[ev]] = true
         if ev == "AUCTION_HOUSE_SHOW" and C_Timer and C_Timer.After then C_Timer.After(1.5, function() T.measureAll() end) end
     elseif CLOSE[ev] then
+        if ev == "QUEST_FINISHED" and not ctx.quest then return end   -- it also closes the other quest frames
         ctx[CLOSE[ev]] = nil
+        lastClosed = CLOSE[ev]
         grace = ns.now() + 1                                     -- the bags settle a moment after the window closes
+    elseif ev == "QUEST_TURNED_IN" then soon("quest"); return
     elseif ev == "PLAYER_MONEY" or ev == "PLAYER_ENTERING_WORLD" then onMoney()
     elseif ev == "BAG_UPDATE_DELAYED" then onBags()
     elseif ev == "PLAYER_LOGOUT" then
         local S = sess()
         if S and S.on then S.acc, S.at = S.acc + math.max(0, ns.now() - S.at), ns.now() end
+        noteMine()
         return
     else return end                                              -- auction scan pages and the like are not ours
     if ns.ui and ns.ui.OnTools then ns.ui:OnTools(ev) end
