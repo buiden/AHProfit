@@ -151,6 +151,8 @@ local function place()
     if ctx.trade then return "trade" end
     return "loot"
 end
+-- The windows where items leave or enter the bags without being farmed (sold, posted, stored, traded).
+local BAG_WINDOWS = { vendor = true, mail = true, ah = true, trade = true, bank = true }
 local function neutral() return ctx.vendor or ctx.mail or ctx.ah or ctx.trade or ctx.bank or ns.now() <= grace end
 local function counts(items)
     local c = {}
@@ -158,15 +160,17 @@ local function counts(items)
     return c
 end
 function T.sessionOn() local S = sess(); return S ~= nil and S.on == true end
+local onMoney
 function T.sessionStart()
     local D = ns.db()
     if not D then return false end
+    onMoney()                      -- a change not yet seen belongs to the time before; the ledger still gets it
     local _, items = T.bags()
     local t = ns.now()
     D.session = { on = true, acc = 0, at = t, started = t, inc = {}, out = {}, net = {}, cur = counts(items or {}), bags = items ~= nil }
     T.where(D.session)
     local m = GetMoney and GetMoney()
-    lastMoney = num(m) and m or nil
+    if not num(m) then D.session.blind = true end                -- hidden now: the next change is not the session's
     return true
 end
 function T.sessionStop()
@@ -176,13 +180,14 @@ function T.sessionStop()
     T.archive(S)
     return true
 end
-local function onMoney()
+onMoney = function()
     local m = GetMoney and GetMoney()
     if not num(m) then return end
     local S = sess()
     if lastMoney then
         local d, c = m - lastMoney, place()
-        if S and S.on then
+        if S and S.on and S.blind then S.blind = nil
+        elseif S and S.on then
             if d > 0 then S.inc[c] = (S.inc[c] or 0) + d elseif d < 0 then S.out[c] = (S.out[c] or 0) - d end
         end
         if d ~= 0 then onLedger(d) end
@@ -253,23 +258,24 @@ local function me()
     return n .. "-" .. r
 end
 local function writable() local D = ns.db(); return D and ns.sharedOK and ns.sharedOK() and type(D.ledger) == "table" and D or nil end
-local recent = {}                  -- source -> until when a just-closed window or a just-made call still counts
-local lastClosed
+local recent = {}                  -- source -> until when a just-made call still counts
+local lastClosed, ledgerGrace = nil, 0   -- the window closed last, and until when money still goes to it
+-- Money taken from mails: each take call notes what it expects (kind "ah" for an auction invoice, else "mail", and
+-- the mail's money when the game tells it). Money coming in at the mailbox is matched to these in order, so taking
+-- many mails at once still splits auction sales from other mail, even when the game merges money events.
+local mailq = {}
 local function soon(src, sec) recent[src] = ns.now() + (sec or 2) end
 local function within(src) return recent[src] ~= nil and ns.now() <= recent[src] end
 local function ledgerSource(d)
     if d < 0 and ((InRepairMode and InRepairMode() == true) or within("repair")) then return "repair" end
     if ctx.vendor then return "vendor" end
     if ctx.ah then return "ah" end
-    if ctx.mail then return (d > 0 and within("mailah")) and "ah" or "mail" end   -- money from an auction invoice
+    if ctx.mail then return "mail" end
     if ctx.trade then return "trade" end
     if ctx.trainer then return "trainer" end
     if ctx.taxi or within("taxi") then return "taxi" end
     if ctx.quest or within("quest") then return "quest" end
-    if lastClosed and ns.now() <= grace then
-        if lastClosed == "mail" and d > 0 and within("mailah") then return "ah" end
-        if SOURCES[lastClosed] then return lastClosed end
-    end
+    if lastClosed and ns.now() <= ledgerGrace and SOURCES[lastClosed] then return lastClosed end
     return d > 0 and "loot" or "other"
 end
 T.ledgerSource = ledgerSource
@@ -289,7 +295,7 @@ local function trimChars(L, today, keep)
         if newest then list[#list + 1] = { k, newest } else L[k] = nil end
     end
     if #list <= LEDGER_CHARS then return end
-    table.sort(list, function(a, b) if a[1] == keep then return true elseif b[1] == keep then return false end
+    table.sort(list, function(a, b) if a[1] == keep then return b[1] ~= keep elseif b[1] == keep then return false end
         if a[2] ~= b[2] then return a[2] > b[2] end return a[1] < b[1] end)
     for i = LEDGER_CHARS + 1, #list do L[list[i][1]] = nil end
 end
@@ -303,10 +309,26 @@ onLedger = function(d)
     local day = C[today]
     if not day then day = {}; C[today] = day; pruneChar(C, today) end
     if new then trimChars(D.ledger, today, k) end                -- after the day exists, so the new character counts
+    local function add(src, x)
+        local e = day[src]
+        if not e then e = { 0, 0 }; day[src] = e end
+        if x > 0 then e[1] = math.min(MAXC, e[1] + x) else e[2] = math.min(MAXC, e[2] - x) end
+    end
     local src = ledgerSource(d)
-    local e = day[src]
-    if not e then e = { 0, 0 }; day[src] = e end
-    if d > 0 then e[1] = math.min(MAXC, e[1] + d) else e[2] = math.min(MAXC, e[2] - d) end
+    if src == "mail" and d > 0 then
+        local t = ns.now()
+        while mailq[1] and t - mailq[1][3] > 30 do table.remove(mailq, 1) end   -- a take whose money never came
+        local rest = d
+        while rest > 0 and mailq[1] do
+            local q = mailq[1]
+            local x = q[2] and math.min(rest, q[2]) or rest             -- unknown amount: this whole change
+            add(q[1], x); rest = rest - x
+            if q[2] and q[2] > x then q[2] = q[2] - x else table.remove(mailq, 1) end
+        end
+        if rest > 0 then add("mail", rest) end
+        return
+    end
+    add(src, d)
 end
 
 -- ------------------------------------------------------------------------------------------ session archive --
@@ -347,7 +369,8 @@ end
 -- DB.items[id] = { name, vendor price, time last seen }, for the items in your bank, your auctions and your
 -- sessions, so tools outside the game can name them. Only what the client has loaded is stored; the rest is asked
 -- for and tried again at logout. At most ITEMS, the least recently seen dropped first.
-local missing = {}
+local missing, missingN, MISSING_MAX = {}, 0, 500
+function T.missingCount() return missingN end
 function T.noteItems(ids)
     local D = writable()
     if not (D and type(D.items) == "table") then return end
@@ -359,9 +382,9 @@ function T.noteItems(ids)
             if type(name) == "string" and name ~= "" and #name <= 200 and okNum(vendor, 1e10) then
                 local e = I[id]
                 if e then e[1], e[2], e[3] = name, vendor, t else I[id] = { name, vendor, t }; added = true end
-                missing[id] = nil
-            else
-                missing[id] = true
+                if missing[id] then missing[id] = nil; missingN = missingN - 1 end
+            elseif not missing[id] and missingN < MISSING_MAX then    -- at most MISSING_MAX wait; the rest come again later
+                missing[id] = true; missingN = missingN + 1
                 if C_Item and C_Item.RequestLoadItemDataByID then pcall(C_Item.RequestLoadItemDataByID, id) end
             end
         end
@@ -411,7 +434,7 @@ local function loadV3()
             end
         end
     end
-    trimChars(D.ledger, today)
+    trimChars(D.ledger, today, me())
     local A, keep = D.sessions, {}
     for i = 1, #A do
         local s = A[i]
@@ -453,7 +476,11 @@ local function hooks()
     if TakeTaxiNode then hooksecurefunc("TakeTaxiNode", function() soon("taxi", 3) end) end
     local function mail(i)
         local ok, kind = pcall(function() return GetInboxInvoiceInfo and GetInboxInvoiceInfo(i) end)
-        if ok and kind == "seller" and not secret(kind) then soon("mailah") else recent.mailah = nil end
+        local ok2, m = pcall(function() if GetInboxHeaderInfo then return select(5, GetInboxHeaderInfo(i)) end end)
+        kind = (ok and not secret(kind) and kind == "seller") and "ah" or "mail"
+        m = (ok2 and okNum(m, MAXC) and m > 0) and m or nil
+        if m == nil and kind == "mail" then return end           -- nothing to expect: plain mail money is "mail" anyway
+        if #mailq < 50 then mailq[#mailq + 1] = { kind, m, ns.now() } end
     end
     if TakeInboxMoney then hooksecurefunc("TakeInboxMoney", mail) end
     if AutoLootMailItem then hooksecurefunc("AutoLootMailItem", mail) end
@@ -471,8 +498,8 @@ function T.event(ev)
     elseif CLOSE[ev] then
         if ev == "QUEST_FINISHED" and not ctx.quest then return end   -- it also closes the other quest frames
         ctx[CLOSE[ev]] = nil
-        lastClosed = CLOSE[ev]
-        grace = ns.now() + 1                                     -- the bags settle a moment after the window closes
+        lastClosed, ledgerGrace = CLOSE[ev], ns.now() + 1        -- money a moment after the window closes is still its
+        if BAG_WINDOWS[CLOSE[ev]] then grace = ns.now() + 1 end  -- the bags settle a moment after these close
     elseif ev == "QUEST_TURNED_IN" then soon("quest"); return
     elseif ev == "PLAYER_MONEY" or ev == "PLAYER_ENTERING_WORLD" then onMoney()
     elseif ev == "BAG_UPDATE_DELAYED" then onBags()

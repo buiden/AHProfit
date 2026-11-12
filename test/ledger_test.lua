@@ -19,6 +19,8 @@ function TakeTaxiNode() end
 function TakeInboxMoney() end
 function AutoLootMailItem() end
 function GetInboxInvoiceInfo(i) return W.invoice[i] end
+W.mailMoney = {}
+function GetInboxHeaderInfo(i) return nil, nil, "x", "y", W.mailMoney[i] or 0 end
 function hooksecurefunc(name, fn) local old = _G[name]; _G[name] = function(...) old(...); fn(...) end end
 DEFAULT_CHAT_FRAME = { AddMessage = function(_, m) chat[#chat + 1] = m end }
 C_Timer = { After = function(_, fn) timers[#timers + 1] = fn end }
@@ -197,6 +199,59 @@ db.bank = { ["Abdullah-Realm"] = { t = 1, items = { { 2840, 5, 0 } } } }
 db.auc = { own = { ["Abdullah-Realm"] = { t = 1, list = { { 2770, 20, 100, 0 } } } } }
 fire("PLAYER_LOGOUT")
 ok("items: the bank and auction items of this character are named at logout", db.items[2840] and db.items[2770] and db.items[2770][1] == "Copper Ore")
+
+-- ---- review fixes (مانع, PR-D)
+do
+    -- F1: closing the trainer, flight map or quest frame does not hide the items that follow from the session
+    W.money = 1000; boot({})
+    local T = ns.tools
+    local cur = {}
+    T.bags = function() local c = {}; for id, n in pairs(cur) do c[id] = { n = n } end; return 0, c end
+    T.sessionStart()
+    fire("QUEST_COMPLETE"); fire("QUEST_FINISHED"); cur[2592] = 1; fire("BAG_UPDATE_DELAYED")
+    fire("TRAINER_SHOW"); fire("TRAINER_CLOSED"); cur[2770] = 5; fire("BAG_UPDATE_DELAYED")
+    fire("TAXIMAP_OPENED"); fire("TAXIMAP_CLOSED"); cur[2840] = 2; fire("BAG_UPDATE_DELAYED")
+    local S = AHProfitDB.session
+    ok("session: a quest reward right after the quest frame closes is counted", S.net[2592] == 1, S.net[2592])
+    ok("session: items right after the trainer or flight map closes are counted", S.net[2770] == 5 and S.net[2840] == 2, tostring(S.net[2770]) .. " " .. tostring(S.net[2840]))
+    fire("MERCHANT_SHOW"); fire("MERCHANT_CLOSED"); cur[2589] = 3; fire("BAG_UPDATE_DELAYED")
+    ok("session: right after a vendor closes, bag changes still settle (not counted)", S.net[2589] == nil)
+    W.time = W.time + 5
+    -- ...while money a moment after those windows close still goes to them in the ledger
+    fire("TRAINER_SHOW"); fire("TRAINER_CLOSED"); money(-70)
+    ok("ledger: money a moment after the trainer closes is trainer", select(2, io2("trainer")) == 70)
+    W.time = W.time + 5
+    -- F2: a money change not yet seen when a session starts still reaches the ledger, and not the new session
+    local before = 0; for _, e in pairs(L()) do before = before + e[1] - e[2] end
+    W.money = W.money + 1234; T.sessionStart(); fire("PLAYER_MONEY"); W.money = W.money + 1; fire("PLAYER_MONEY")
+    local after = 0; for _, e in pairs(L()) do after = after + e[1] - e[2] end
+    ok("ledger: a change pending when a session starts is recorded", after - before == 1235, after - before)
+    ok("session: ...but belongs to the time before the session", (AHProfitDB.session.inc.loot or 0) == 1, AHProfitDB.session.inc.loot)
+    -- S2: taking many mails at once: each take's money goes to its own kind, in order, even when events merge
+    W.time = W.time + 5
+    fire("MAIL_SHOW")
+    W.invoice = { [1] = "seller", [2] = nil, [3] = "seller", [4] = nil }
+    W.mailMoney = { [1] = 9000, [2] = 100, [3] = 4000, [4] = 50 }
+    local ah0, m0 = io2("ah"), io2("mail")
+    AutoLootMailItem(1); AutoLootMailItem(2); AutoLootMailItem(3); AutoLootMailItem(4)
+    money(9000); money(100 + 4000); money(50)
+    fire("MAIL_CLOSED")
+    ok("ledger: open-all mail splits auction money and other mail money by take", io2("ah") - ah0 == 13000 and io2("mail") - m0 == 150,
+        (io2("ah") - ah0) .. " " .. (io2("mail") - m0))
+    W.time = W.time + 5
+    fire("MAIL_SHOW"); W.invoice, W.mailMoney = {}, {}; money(77); fire("MAIL_CLOSED")
+    ok("ledger: mail money with no take call noted is mail", io2("mail") - m0 == 227)
+    W.time = W.time + 5
+    -- notes: the current character is never trimmed at load; the names still to fetch are bounded
+    local db = AHProfitDB
+    for i = 1, 60 do db.ledger["Alt" .. i .. "-Realm"] = { [today()] = { loot = { i, 0 } } } end
+    db.ledger["Abdullah-Realm"] = { [today() - 170] = { loot = { 1, 0 } } }
+    db = boot(db)
+    ok("ledger: at load the current character is kept even when it is the least recent", db.ledger["Abdullah-Realm"] ~= nil)
+    local ids = {}; for i = 1, 900 do ids[i] = 700000 + i end
+    ns.tools.noteItems(ids)
+    ok("items: at most 500 names wait to be fetched", ns.tools.missingCount() <= 500, ns.tools.missingCount())
+end
 
 for _, m in ipairs(chat) do if m:find("rror") then ok("no error in chat: " .. m, false) end end
 print(pass .. " passed, " .. fail .. " failed")
