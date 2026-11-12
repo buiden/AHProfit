@@ -473,13 +473,16 @@ do
         if Hh then
             local sd = n2.scanDay(W.time)
             Hh[900001] = n2.histEncode({ { sd - 4, 2000, 0, 1 }, { sd - 3, 2000, 0, 1 }, { sd - 2, 2000, 0, 1 }, { sd - 1, 2000, 0, 1 }, { sd, 2000, 0, 1 } })
+            if n2.histChanged then n2.histChanged() end
             U.tabs.deals.scripts.OnClick[1]()
             local dipE
             for _, e in ipairs(U.entries) do if e.left == "Test Ore" then dipE = e end end
             local dl = dipE and dipE.detail() or {}
             local txt = plain(table.concat(dl, "\n"))
             ok("own-history dip detail names its source", txt:find("over 5 days, from your own scans", 1, true), txt)
+            ok("own-history dip detail does not promise a graph of your own prices", not txt:find("shows its graph", 1, true), txt)
             Hh[900001] = nil
+            if n2.histChanged then n2.histChanged() end
         else ok("own-history dip detail names its source", false, "no history") end
         AHProfitDB.auc = { own = { [X.me()] = { t = W.time, list = { { 900001, 10, 700, 0 }, { 900003, 1, 900, 1 } } } } }
         U.tabs.auc.scripts.OnClick[1]()

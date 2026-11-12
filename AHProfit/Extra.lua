@@ -140,6 +140,67 @@ X.DIP = 0.75
 -- kind "dip": an item is at or below 75% of its own usual price (the middle of its daily prices, 5 days or more).
 -- Daily prices come from your own scans (ns.histOwn, the day's highest low) when they cover 5 days or more, else
 -- from the bundled History.lua; own = true says which.
+-- The usual price (median of 5 or more daily prices) of every item that has one. Decoding every history string is
+-- the slow part, so the result is kept until the next history write, a house change, a new day or another bundled
+-- history table.
+local usual = {}
+local function usualKey()
+    local H = ns.histHouse and ns.histHouse()
+    return tostring(H) .. "|" .. (ns.histVersion and ns.histVersion() or 0) .. "|" .. (ns.scanDay and ns.scanDay(ns.now()) or 0) .. "|" .. tostring(ns.hist)
+end
+-- Per item, the decoded own prices are also kept with the string they came from (strings are interned, so the
+-- comparison is cheap): after a write only the items whose string changed are decoded again.
+local ownMemo = setmetatable({}, { __mode = "k" })               -- house table -> { [id] = { s, day, n, med } }
+local bundledMemo = {}                                           -- { hist = table, [idx] = { n, med } }
+local function usualOf(ps) return { n = #ps, med = #ps >= 5 and median(ps) or nil } end
+local function ownUsual(H, id, today)
+    local m = ownMemo[H]
+    if not m then m = {}; ownMemo[H] = m end
+    local e, s = m[id], H[id]
+    if e and e.s == s and e.day == today then return e end
+    local ps = {}
+    for i, p in ipairs(ns.histOwn and ns.histOwn(id) or {}) do ps[i] = p.p end
+    e = usualOf(ps)
+    e.s, e.day = H[id], today
+    m[id] = H[id] and e or nil                                   -- (an expired item may have just been dropped)
+    return e
+end
+local function bundledUsual(idx)
+    if bundledMemo.hist ~= ns.hist then bundledMemo = { hist = ns.hist } end
+    local e = bundledMemo[idx]
+    if not e then
+        local ps, s = {}, Tl.histSeries(idx)
+        if s then for i, p in ipairs(s.pts) do ps[i] = p.p end end
+        e = usualOf(ps)
+        bundledMemo[idx] = e
+    end
+    return e
+end
+function X.usualPrices()
+    if usual.key == usualKey() then return usual.list end
+    local list, cands, done = {}, {}, {}
+    local H = ns.histHouse and ns.histHouse()
+    local today = ns.scanDay and ns.scanDay(ns.now()) or 0
+    if H then for id in pairs(H) do cands[#cands + 1] = { id = id } end end
+    for _, m in ipairs(Tl.histList()) do cands[#cands + 1] = { id = m.id, name = m.name, idx = m.idx } end
+    for _, c in ipairs(cands) do
+        if not done[c.id] then
+            local u, own = nil, false
+            local mine = (H and H[c.id]) and ownUsual(H, c.id, today)
+            if mine and mine.med then
+                u, own = mine, true
+            elseif c.idx then
+                u = bundledUsual(c.idx)
+            end
+            if u and u.med then
+                done[c.id] = true
+                list[#list + 1] = { id = c.id, name = c.name, med = u.med, days = u.n, own = own }
+            end
+        end
+    end
+    usual.key, usual.list = usualKey(), list                     -- after the reads above (they may drop expired items)
+    return list
+end
 function X.deals()
     local D, out = db(), {}
     if not D or not Tl then return out end
@@ -151,32 +212,11 @@ function X.deals()
             if p and p < v then out[#out + 1] = { kind = "vendor", id = id, name = itemName(id), price = p, vendor = v, gain = v - p, qty = q or 0, t = t, src = src, from = from } end
         end
     end
-    local cands, done = {}, {}
-    local H = ns.histHouse and ns.histHouse()
-    if H then for id in pairs(H) do cands[#cands + 1] = { id = id } end end
-    for _, m in ipairs(Tl.histList()) do cands[#cands + 1] = { id = m.id, name = m.name, idx = m.idx } end
-    for _, c in ipairs(cands) do
-        if not done[c.id] then
-            local ps, own = {}, false
-            local mine = ns.histOwn and ns.histOwn(c.id) or {}
-            if #mine >= 5 then
-                own = true
-                for i, p in ipairs(mine) do ps[i] = p.p end
-            elseif c.idx then
-                local s = Tl.histSeries(c.idx)
-                if s then for i, p in ipairs(s.pts) do ps[i] = p.p end end
-            end
-            if #ps >= 5 then
-                done[c.id] = true
-                local now, q, t, src, from = ns.lookup(c.id)
-                if now then
-                    local med = median(ps)
-                    if now <= med * X.DIP then
-                        out[#out + 1] = { kind = "dip", id = c.id, name = c.name or itemName(c.id), price = now, usual = med, days = #ps, own = own,
-                            below = 1 - now / med, qty = q or 0, t = t, src = src, from = from }
-                    end
-                end
-            end
+    for _, u in ipairs(X.usualPrices()) do
+        local now, q, t, src, from = ns.lookup(u.id)
+        if now and now <= u.med * X.DIP then
+            out[#out + 1] = { kind = "dip", id = u.id, name = u.name or itemName(u.id), price = now, usual = u.med, days = u.days, own = u.own,
+                below = 1 - now / u.med, qty = q or 0, t = t, src = src, from = from }
         end
     end
     table.sort(out, function(a, b)

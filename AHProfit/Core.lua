@@ -206,18 +206,43 @@ local function histDecode(s, today)
 end
 ns.histEncode, ns.histDecode = histEncode, histDecode
 local histCount = setmetatable({}, { __mode = "k" })
-local function histHouse()
+-- histVersion changes whenever any history string is written or dropped, so readers can cache decoded results.
+local histVersion = 0
+ns.histVersion = function() return histVersion end
+ns.histChanged = function() histVersion = histVersion + 1 end
+local function histHouseOf(k)
     if DB.v ~= KNOWN_V then return nil end
-    local k = houseKey()
     local H = DB.hist[k]
     if not H then H = {}; DB.hist[k] = H; histCount[H] = 0 end
     if not histCount[H] then local n = 0; for _ in pairs(H) do n = n + 1 end; histCount[H] = n end
     return H
 end
+local function histHouse() return histHouseOf(houseKey()) end
 ns.histHouse = histHouse
+-- Items whose recorded days have all expired (or whose string is damaged) give their place back. This looks at up
+-- to max items per call, continuing where the last call stopped; it returns how many it looked at.
+local sweepAt = setmetatable({}, { __mode = "k" })
+local function histSweep(H, today, max)
+    local k, used = sweepAt[H], 0
+    if k ~= nil and H[k] == nil then k = nil end
+    while used < max do
+        local id, e = next(H, k)
+        if id == nil then sweepAt[H] = nil; return used end      -- went round once
+        used = used + 1
+        local d = histDecode(e, today)
+        if not d or #d == 0 then H[id] = nil; histCount[H] = histCount[H] - 1; histVersion = histVersion + 1
+        else k = id end
+    end
+    sweepAt[H] = k
+    return used
+end
+local sweepLeft = 0                -- decodes the sweep may still spend in the current batch
 local function histAdd(H, id, p, q, day)
     local days
     if H[id] == nil then
+        if histCount[H] >= ns.HIST_ITEMS and sweepLeft > 0 then
+            sweepLeft = sweepLeft - histSweep(H, scanDay(now()), math.min(sweepLeft, 50))
+        end
         if histCount[H] >= ns.HIST_ITEMS then return end
         days = {}
         histCount[H] = histCount[H] + 1
@@ -235,11 +260,15 @@ local function histAdd(H, id, p, q, day)
         days[#days + 1] = { day, p, 0, q }
     end
     H[id] = histEncode(days)
+    histVersion = histVersion + 1
 end
 -- Daily prices of one item from your own scans, oldest first: { { d = day, p = h, l = l or h, a = a }, ... }.
 function ns.histOwn(id)
     local H = histHouse()
     local days = H and H[id] and histDecode(H[id], scanDay(now()))
+    if H and H[id] and (not days or #days == 0) then             -- all days expired, or damaged: give the place back
+        H[id] = nil; histCount[H] = histCount[H] - 1; histVersion = histVersion + 1
+    end
     local out = {}
     for _, e in ipairs(days or {}) do out[#out + 1] = { d = e[1], p = e[2], l = e[3] > 0 and e[3] or e[2], a = e[4] } end
     return out
@@ -328,34 +357,48 @@ local scanId, seen, scanCount = 0, {}, 0
 local pend = {}                    -- items seen in the current query, written to the daily history when it ends
 -- Writing re-encodes each item's string, so a full scan of thousands of items is spread over frames: up to
 -- HIST_BATCH items per frame, the rest on the next ones. Whatever is still waiting is written at logout (and at
--- /reload), before the game saves.
-local HIST_BATCH, queue, qi, qBusy = 400, {}, 1, false
-local function histStep(all)
-    local H = histHouse()
-    local stop = all and #queue or math.min(#queue, qi + HIST_BATCH - 1)
-    for i = qi, stop do
-        local w = queue[i]
-        if H and w[5] == H then histAdd(H, w[1], w[2], w[3], w[4]) end
-        queue[i] = nil
+-- /reload), before the game saves. The queue runs from qh to qt (explicit bounds: Lua 5.1's # is undefined on a
+-- table with holes). Each row carries the house and the day it was scanned on. A row that fails is skipped; the
+-- rest go on.
+local HIST_BATCH, SWEEP_STEP, SWEEP_LOGOUT = 400, 200, 1000
+local queue, qh, qt, qBusy = {}, 1, 0, false
+local function histRows(stop)
+    while qh <= stop do
+        local w = queue[qh]
+        queue[qh] = nil; qh = qh + 1                             -- past it first, so an error skips only this row
+        local H = histHouseOf(w[5])
+        if H then histAdd(H, w[1], w[2], w[3], w[4]) end
     end
-    qi = stop + 1
-    if qi > #queue then queue, qi, qBusy = {}, 1, false; return end
+end
+local function histStep(all, sweep)
+    sweepLeft = sweep or SWEEP_STEP
+    local stop = all and qt or math.min(qt, qh + HIST_BATCH - 1)
+    while qh <= stop do pcall(histRows, stop) end
+    if qh > qt then queue, qh, qt, qBusy = {}, 1, 0, false; return end
     if C_Timer and C_Timer.After then C_Timer.After(0, function() histStep(false) end) else histStep(true) end
 end
 local function flushHist()
-    local H = next(pend) and histHouse()
-    if H then
-        local L, day = live(), scanDay(now())
-        for id in pairs(pend) do
+    local k = next(pend) and DB.v == KNOWN_V and houseKey()
+    if k then
+        local L = live()
+        for id, day in pairs(pend) do
             local p, q = L.p[id], L.q[id]
-            if p then queue[#queue + 1] = { id, p, q or 0, day, H } end
+            if p then qt = qt + 1; queue[qt] = { id, p, q or 0, day, k } end
         end
     end
     pend = {}
-    if qBusy or qi > #queue then return end
-    if #queue - qi + 1 <= HIST_BATCH then histStep(true) else qBusy = true; histStep(false) end
+    if qBusy or qh > qt then return end
+    if qt - qh + 1 <= HIST_BATCH then histStep(true) else qBusy = true; histStep(false) end
 end
-ns.histFinish = function() flushHist(); if qi <= #queue then histStep(true) end end
+-- At logout: everything still waiting, then a little more of the sweep for the current house.
+ns.histFinish = function()
+    pcall(function()
+        flushHist()
+        if qh <= qt then histStep(true, SWEEP_LOGOUT) end
+        local H = histHouse()
+        if H then histSweep(H, scanDay(now()), SWEEP_LOGOUT) end
+    end)
+end
 
 local function record(results)
     if type(results) ~= "table" then return end
@@ -372,7 +415,7 @@ local function record(results)
                 seen[id] = scanId; scanCount = scanCount + 1
                 L.p[id], L.q[id], L.t[id] = price, q, t
             end
-            pend[id] = true
+            pend[id] = pend[id] or scanDay(t)                    -- the day it was seen, even if written after midnight
         end
     end
 end

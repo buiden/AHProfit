@@ -216,6 +216,8 @@ do
     -- item cap
     local cap = ns.HIST_ITEMS
     local H = (AHProfitDB.hist or {})["TestRealm|Alliance"]
+    local ids = {}; for id in pairs(H or {}) do ids[#ids + 1] = id end
+    for _, id in ipairs(ids) do own(id) end                      -- reading gives back the places of expired items
     local n0 = 0; for _ in pairs(H or {}) do n0 = n0 + 1 end
     ns.HIST_ITEMS = n0 + 1
     fire("AUCTION_HOUSE_SHOW"); timers = {}; query({ R(9601, 5, 1), R(9602, 5, 1), R(7001, 80, 1) }); fire("AUCTION_HOUSE_CLOSED")
@@ -227,6 +229,86 @@ do
     fire("AUCTION_HOUSE_SHOW"); timers = {}; fire("AUCTION_HOUSE_CLOSED")
     ok("history: prices not from your own browsing are not recorded", #own(7999) == 0)
 end
+-- ---- review round 2 (PR-B): the write queue loses nothing, survives errors, keeps house and day; expired items
+-- give their place back
+do
+    local T0 = S.time
+    local function boot(saved) AHProfitDB = saved; ns = {}; load("Data.lua"); load("Core.lua"); fire("ADDON_LOADED", "AHProfit"); AHProfitDB.autoscan = false; timers = {}; return AHProfitDB end
+    local key = "TestRealm|Alliance"
+    local function nHist(k) local n = 0; for _ in pairs((AHProfitDB.hist or {})[k or key] or {}) do n = n + 1 end return n end
+    local function fullScan(n, base, price)
+        fire("AUCTION_HOUSE_SHOW"); timers = {}
+        S.pages = { {} }; for i = 1, n do S.pages[1][i] = R(base + i, price + i, 1) end
+        SlashCmdList.AHPROFIT("scan"); fire("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
+    end
+    local function drain() local f = 0; while #timers > 0 and f < 200 do runTimers(); f = f + 1 end return f end
+    for _, n in ipairs({ 401, 1000, 5800, 10000 }) do
+        boot({})
+        fullScan(n, 100000, 100)
+        drain()
+        ok("history queue: a full scan of " .. n .. " items records every one", nHist() == n, nHist())
+        fire("AUCTION_HOUSE_CLOSED")
+    end
+    -- an error on one row skips that row only; the queue does not stick and logout still writes
+    boot({})
+    AHProfitDB.hist[key] = setmetatable({}, { __newindex = function(t, k, v) if k == 200500 then error("boom") end rawset(t, k, v) end })
+    local ok1 = pcall(fullScan, 1000, 200000, 100)
+    local ok2 = pcall(drain)
+    ok("history queue: an error on one row does not stop the rest", ok1 and ok2 and nHist() == 999, nHist())
+    fire("AUCTION_HOUSE_CLOSED")
+    pcall(fullScan, 50, 300000, 100); pcall(drain); fire("AUCTION_HOUSE_CLOSED")
+    ok("history queue: ...and is not left busy (the next scan is written)", nHist() == 1049, nHist())
+    pcall(fullScan, 1000, 200000, 500)
+    timers = {}                                                  -- logout before the next frame
+    local ok3 = pcall(fire, "PLAYER_LOGOUT")
+    local Hk = AHProfitDB.hist[key]
+    local h1 = ns.histOwn(201000)
+    ok("history queue: logout with a failing row still writes the rest, without an error", ok3 and h1[1] and h1[1].p == 1500, ok3 and h1[1] and h1[1].p)
+    fire("AUCTION_HOUSE_CLOSED")
+    -- rows go to the house they were scanned on, even if the house changes before they are written
+    boot({})
+    fullScan(1000, 400000, 100)                                  -- 400 written, 600 waiting
+    fire("AUCTION_HOUSE_CLOSED")
+    S.realm = "OtherRealm"
+    drain()
+    S.realm = "TestRealm"
+    ok("history queue: waiting rows go to the house they were scanned on", nHist() == 1000 and nHist("OtherRealm|Alliance") == 0, nHist() .. " " .. nHist("OtherRealm|Alliance"))
+    -- a query seen before midnight counts for that day even if written after it
+    boot({})
+    local mid = 1577836800 + (ns.scanDay(S.time) + 1) * 86400
+    S.time = mid - 5
+    fire("AUCTION_HOUSE_SHOW"); timers = {}
+    S.pages = { { R(500001, 77, 1) } }
+    fire("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
+    S.time = mid + 5
+    fire("AUCTION_HOUSE_CLOSED")
+    local hm = ns.histOwn(500001)
+    ok("history: a query seen before midnight counts for that day", hm[1] and hm[1].d == ns.scanDay(mid - 5), hm[1] and hm[1].d)
+    S.time = T0
+    -- at the item cap, items whose days have all expired give their place to new ones
+    local today = ns.scanDay(S.time)
+    local enc = ns.histEncode
+    local old = {}
+    for i = 1, 10000 do old[600000 + i] = enc({ { today - 30, 5, 0, 1 } }) end
+    boot({ v = 2, hist = { [key] = old } })
+    fire("AUCTION_HOUSE_SHOW"); timers = {}
+    S.pages = { { R(700001, 9, 1), R(700002, 9, 1) } }
+    fire("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED"); fire("AUCTION_HOUSE_CLOSED"); drain()
+    ok("history: at the cap, expired items give their place to new ones", #ns.histOwn(700001) == 1 and #ns.histOwn(700002) == 1 and nHist() <= 10000, nHist())
+    -- ...but items with a recent day keep theirs
+    local fresh = {}
+    for i = 1, 10000 do fresh[800000 + i] = enc({ { today - 1, 5, 0, 1 } }) end
+    boot({ v = 2, hist = { [key] = fresh } })
+    fire("AUCTION_HOUSE_SHOW"); timers = {}
+    S.pages = { { R(900001, 9, 1) } }
+    fire("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED"); fire("AUCTION_HOUSE_CLOSED"); drain()
+    ok("history: at the cap, items with recent days keep their place", #ns.histOwn(900001) == 0 and nHist() == 10000, nHist())
+    -- the logout flush also gives back places of expired items, a bounded number at a time
+    boot({ v = 2, hist = { [key] = (function() local t = {}; for i = 1, 3000 do t[600000 + i] = enc({ { today - 30, 5, 0, 1 } }) end; return t end)() } })
+    fire("PLAYER_LOGOUT")
+    ok("history: logout frees expired items, at most 1,000 looked at", nHist() == 2000, nHist())
+end
+
 -- ---- saved history checked at load
 do
     local function boot(saved)

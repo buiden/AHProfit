@@ -388,6 +388,26 @@ do
     W.guild = true
 end
 
+-- ---- guild-received prices never enter your own daily history
+do
+    local c = client("ProbeHist")
+    cur = c
+    W.guild = false
+    local t0 = math.floor(W.time)
+    local function to(msg) fire(c, "CHAT_MSG_ADDON", "AHProfit", msg, "GUILD", "Guildmate-Realm", "", 0, 0, "", 0) end
+    local ch, n = c.ns.sync.encode({ p = { [4242] = 99, [4243] = 98 }, q = { [4242] = 1, [4243] = 1 } })
+    to("H1,135791," .. t0 .. "," .. n .. "," .. #ch)
+    for i, p in ipairs(ch) do to("D135791," .. i .. "," .. p) end
+    ok("guild scan received", G(c).p[4242] == 99)
+    run(5)
+    fire(c, "PLAYER_LOGOUT")
+    local hist = c.db.hist or {}
+    local any = false
+    for _, H in pairs(hist) do if H[4242] or H[4243] then any = true end end
+    ok("guild-received prices never enter your own daily history", not any and c.ns.histOwn and #c.ns.histOwn(4242) == 0)
+    W.guild = true
+end
+
 -- ---- size of a real scan
 do
     local ns2 = {}
