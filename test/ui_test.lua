@@ -244,7 +244,7 @@ do
     ok("drops show the scanned price and its listed count", d[1] and d[1].each == 50000000 * CUT and d[1].listed == 7, d[1] and (d[1].each .. " " .. d[1].listed))
     ok("best() uses the scanned price", F.best(nd[6][1], CUT) == 50000000 * CUT)
     S.tab = "mine"; UI:Refresh()
-    ok("the status line says newer scans count", UI.status:GetText():find("or a newer price, your scan or the guild's", 1, true), UI.status:GetText())
+    ok("the status line says a newer price counts", UI.status:GetText():find("or the addon's newer price for the item", 1, true), UI.status:GetText())
     -- a scan older than the farm data does not override it
     L.t[ore[2]] = T - 60
     ok("an older scan leaves the ranking alone", snap() == base)
