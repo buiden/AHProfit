@@ -6,7 +6,7 @@ import sys
 import lupa.lua51 as lupa
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-TESTS = ["test/harness.lua", "test/extra_test.lua", "test/sync_test.lua", "test/ui_test.lua"]
+TESTS = ["test/harness.lua", "test/extra_test.lua", "test/sync_test.lua", "test/ui_test.lua", "test/ledger_test.lua"]
 
 if len(sys.argv) == 2:
     # One test per process: the tests call os.exit with their result.

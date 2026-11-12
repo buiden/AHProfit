@@ -50,6 +50,7 @@ function X.scanBank()
     for _, it in ipairs(list) do items[#items + 1] = { it.id, it.n, it.bound } end
     D.bank = D.bank or {}
     D.bank[me()] = { t = ns.now(), items = items }
+    if ns.tools and ns.tools.noteItems then local ids = {}; for i, it in ipairs(items) do ids[i] = it[1] end; ns.tools.noteItems(ids) end
     return true
 end
 -- Returns the saved bank of this character as a list for the bag advisor, and when it was seen. nil: never seen.
@@ -553,6 +554,7 @@ local function readOwned()
     D.auc = D.auc or {}
     D.auc.own = D.auc.own or {}
     D.auc.own[me()] = { t = ns.now(), list = own }
+    if ns.tools and ns.tools.noteItems then local ids = {}; for i, it in ipairs(own) do ids[i] = it[1] end; ns.tools.noteItems(ids) end
     notify("auc")
 end
 X.readOwned = readOwned

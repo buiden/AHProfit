@@ -151,7 +151,7 @@ SlashCmdList.AHPROFIT(""); ok("status prints", chat[#chat]:find("/ahp farm | sca
 -- ---- PR-B: daily history of your own scans (AHProfitDB.hist), Auctionator's day rules
 do
     local hasHist = type(ns.histOwn) == "function" and type(ns.scanDay) == "function"
-    ok("history: saved data version 2 with a history table", AHProfitDB.v == 2 and type(AHProfitDB.hist) == "table", tostring(AHProfitDB.v))
+    ok("history: saved data version 3 with a history table", AHProfitDB.v == 3 and type(AHProfitDB.hist) == "table", tostring(AHProfitDB.v))
     ok("history: scan day = whole UTC days since 2020-01-01", hasHist and ns.scanDay(1577836800) == 0 and ns.scanDay(1577836800 + 86399) == 0 and ns.scanDay(1577836800 + 86400) == 1 and ns.scanDay(1794385517) == 2506)
     local own = function(id) return hasHist and ns.histOwn(id) or {} end
     local function query(rows) S.pages = { rows }; fire("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED") end
@@ -386,7 +386,7 @@ do
     end
     local today = math.floor((S.time - 1577836800) / 86400)
     local db1 = boot({ v = 1, shared = { ["TestRealm|Alliance"] = { p = { [5] = 9 }, q = { [5] = 1 }, t = { [5] = S.time }, full = 0, from = {} } } })
-    ok("load: a version 1 save gets a history table and keeps its guild prices", db1.v == 2 and type(db1.hist) == "table" and db1.shared and db1.shared["TestRealm|Alliance"].p[5] == 9)
+    ok("load: a version 1 save gets a history table and keeps its guild prices", db1.v == 3 and type(db1.hist) == "table" and db1.shared and db1.shared["TestRealm|Alliance"].p[5] == 9)
     -- a separate encoder, so these strings do not come from the code under test
     local A = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz+/"
     local function digits(v) local o = {}; while v >= 32 do local d = v % 32; o[#o + 1] = A:sub(d + 33, d + 33); v = (v - d) / 32 end o[#o + 1] = A:sub(v + 1, v + 1); return table.concat(o) end
@@ -406,7 +406,7 @@ do
     local db3 = boot(many)
     local nh = 0; for _ in pairs(db3.hist or {}) do nh = nh + 1 end
     ok("load: at most 8 houses, the most recently scanned kept", nh == 8 and db3.hist["R10|Alliance"] and db3.hist["R1|Alliance"] == nil, nh)
-    local db4 = boot({ v = 3, hist = { x = 1 } })
-    ok("load: a save from a newer version is left alone", db4.v == 3 and db4.hist and db4.hist.x == 1)
+    local db4 = boot({ v = 4, hist = { x = 1 }, ledger = { y = 2 } })
+    ok("load: a save from a newer version is left alone", db4.v == 4 and db4.hist and db4.hist.x == 1 and db4.ledger.y == 2 and db4.sessions == nil)
 end
 print(("%d passed, %d failed"):format(pass, fail)); os.exit(fail == 0 and 0 or 1)

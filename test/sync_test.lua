@@ -431,7 +431,7 @@ do
         return c2, AHProfitDB
     end
     local _, db = boot({ live = { ["Realm|Alliance"] = { p = { [9] = 5 }, q = { [9] = 1 }, t = { [9] = 1 }, full = 0 } } })
-    ok("old save: shared layer created, version set, own scans kept", db.v == 2 and type(db.shared) == "table" and db.live["Realm|Alliance"].p[9] == 5)
+    ok("old save: shared layer created, version set, own scans kept", db.v == 3 and type(db.shared) == "table" and db.live["Realm|Alliance"].p[9] == 5)
     local c3, db3 = boot({ v = 1, shared = { ["Realm|Alliance"] = { p = { [7] = "x", [8] = 3 }, q = { [8] = 1 }, t = { [8] = math.floor(W.time) }, full = "no", from = 7 }, junk = 5 } })
     local H3 = db3.shared["Realm|Alliance"]
     ok("malformed shared layer repaired at load", H3 and H3.full == 0 and H3.p[7] == nil and H3.p[8] == 3 and type(H3.from) == "table", H3 and tostring(H3.full))
@@ -440,8 +440,8 @@ do
     local _, db4 = boot(many)
     local n4 = 0; for _ in pairs(db4.shared) do n4 = n4 + 1 end
     ok("at most 8 auction houses kept, the most recent ones", n4 == 8 and db4.shared["Realm12|Alliance"] and not db4.shared["Realm1|Alliance"], n4)
-    local _, db5 = boot({ v = 3, shared = { x = 1 } })
-    ok("a save from a newer version is left alone", db5.v == 3 and db5.shared.x == 1)
+    local _, db5 = boot({ v = 4, shared = { x = 1 } })
+    ok("a save from a newer version is left alone", db5.v == 4 and db5.shared.x == 1)
     -- S2 / B1 at load: prices older than 12 h and sender names no stored price uses are dropped
     local nowL = math.floor(W.time)
     local _, db6 = boot({ v = 1, shared = { ["Realm|Alliance"] = { p = { [1] = 5, [2] = 6 }, q = { [1] = 1, [2] = 1 }, t = { [1] = nowL - 43201, [2] = nowL - 60 }, full = nowL - 43201,
