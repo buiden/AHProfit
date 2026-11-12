@@ -248,6 +248,13 @@ do
     ok("an auction price below the vendor price is not used", s.how == "vendor" and s.value == 120)
     local txt = plain(as(a).profText(10, 5))
     ok("profession window text", txt:find("Test Dagger x1: sells for 9s 50c on the AH after the 5% cut (3 listed", 1, true) and txt:find("Materials 4s 0c.  Profit +5s 50c", 1, true), txt)
+    do  -- a price with no listed count (Auctionator) does not claim "0 listed"
+        local real = a.ns.lookup
+        a.ns.lookup = function(id) local p, q, t, s, f = real(id); if id == 200 and p then return p, nil, t, "auctionator" end return p, q, t, s, f end
+        local t2 = plain(as(a).profText(10, 5))
+        ok("profession window text: an Auctionator price has no listed count", t2:find("on the AH after the 5% cut (Auctionator, today)", 1, true) and not t2:find("listed", 1, true), t2)
+        a.ns.lookup = real
+    end
     ok("unknown recipe has a plain line", as(a).profText(777, 5):find("not read yet", 1, true))
     ok("at a 15% cut the profit shrinks", as(a).recipe(10, 15).profit == 850 - 400)
     a.recipes[10] = nil; W.time = W.time + 2; fire(a, "TRADE_SKILL_LIST_UPDATE"); run(1)

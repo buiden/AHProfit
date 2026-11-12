@@ -248,6 +248,18 @@ do
     -- a scan older than the farm data does not override it
     L.t[ore[2]] = T - 60
     ok("an older scan leaves the ranking alone", snap() == base)
+    -- a price from Auctionator (seen today, after the farm data) has no listed count: never "only 0 listed"
+    do
+        local t0, rt = W.time, time
+        W.time = T + 2 * 86400
+        time = function(x) if type(x) == "table" then return 1577836800 end return W.time end
+        Auctionator = { API = { v1 = { GetAuctionAgeByItemID = function(_, id) return id == ore[2] and 0 or nil end,
+            GetAuctionPriceByItemID = function(_, id) return id == ore[2] and 4000 or nil end } } }
+        local da = F.drops({ nd[6][1], 1 }, CUT)
+        ok("drops: an Auctionator price is used, with no listed count and not called thin", da[1] and da[1].each == math.max(4000 * CUT, ore[5])
+            and da[1].listed == nil and da[1].thin == false, da[1] and tostring(da[1].listed) .. " " .. tostring(da[1].thin))
+        Auctionator, time, W.time = nil, rt, t0
+    end
     -- crafting: a scanned bar price moves the craft's numbers
     local cr = F.crafts(S, CUT)[1]
     L.p[cr.id], L.q[cr.id], L.t[cr.id] = 90000000, 3, T + 60
@@ -269,6 +281,27 @@ do
     ns.lookup = function() error("not ready") end
     ok("a failing price lookup falls back to the farm data", pcall(snap) and snap() == base)
     ns.lookup = saved
+end
+
+-- ---- a crafted item priced by Auctionator (no listed count): its detail opens and claims no count
+do
+    local t0, rt = W.time, time
+    W.time = F.time() + 2 * 86400
+    time = function(x) if type(x) == "table" then return 1577836800 end return W.time end
+    Auctionator = { API = { v1 = { GetAuctionAgeByItemID = function(_, id) return id == 2862 and 0 or nil end,
+        GetAuctionPriceByItemID = function(_, id) return id == 2862 and 100 or nil end } } }
+    local s = AHProfitDB.farm
+    s.mining, s.blacksmithing, s.mSkill, s.bSkill, s.tab = true, true, 300, 300, "craft"
+    UI.sel = nil
+    local sel
+    for i, x in ipairs(UI:Entries()) do if x.left == "Rough Sharpening Stone" then sel = i end end
+    UI.sel = sel
+    local okR, err = pcall(UI.Refresh, UI)
+    local d = okR and UI.detail and UI.detail:GetText() or ""
+    ok("craft detail with an Auctionator price opens and leaves the listed count out", sel ~= nil and okR and d ~= "" and not d:find("listed", 1, true),
+        tostring(sel) .. " " .. tostring(err) .. " " .. d:sub(1, 120))
+    Auctionator, time, W.time = nil, rt, t0
+    UI.sel = 1; UI:Refresh()
 end
 
 -- ================================================================ bags, deposits, session and price history ==
@@ -343,6 +376,14 @@ do
     ok("setup rows hidden on a tool tab", not U.boxes.lvMin:IsShown() and not U.checks.mining:IsShown() and U.intro:GetText() ~= "")
     ok("no map buttons on a tool tab", not U.mapBtn:IsShown() and not U.graph:IsShown() and not U.sessBtn:IsShown())
     ok("detail explains the row", plain(U.detail:GetText()):find("Auction instead of vendor: +7s 0c for your 10", 1, true) and plain(U.detail:GetText()):find("Deposit not measured yet", 1, true), plain(U.detail:GetText()))
+    do  -- a price with no listed count (Auctionator) does not claim "0 listed"
+        local real = n2.lookup
+        n2.lookup = function(id) local p, q, t, s, f = real(id); if id == 900001 and p then return p, nil, W.time, "auctionator" end return p, q, t, s, f end
+        U:Refresh()
+        local d = plain(U.detail:GetText())
+        ok("bags detail: an Auctionator price is named and has no listed count", d:find("AH lowest (Auctionator, today): ", 1, true) and not d:find("each, ", 1, true) and not d:find("0 listed", 1, true), (d:gsub("\n", " | ")))
+        n2.lookup = real; U:Refresh()
+    end
 
     -- ---- deposits are read from the game once the auction house is open
     fire("AUCTION_HOUSE_SHOW")
@@ -465,6 +506,17 @@ do
         ok("deals tab lists an auction below vendor price", hit ~= nil and plain(hit.right) == "+60c each" and hit.sub:find("below vendor price, 9 listed", 1, true), hit and plain(hit.right))
         local lines = hit and hit.detail() or {}
         ok("deal detail states both prices and the gain", #lines >= 4 and plain(lines[3]):find("A vendor pays 5s 0c each: +60c per unit", 1, true), lines[3] and plain(lines[3]))
+        do  -- an unknown listed count (Auctionator) is left out, never "0 listed"
+            local real = n2.lookup
+            n2.lookup = function(id) local p, q, t, s, f = real(id); if id == 900002 and p then return p, nil, W.time, "auctionator" end return p, q, t, s, f end
+            U.tabs.deals.scripts.OnClick[1]()
+            local h2
+            for _, x in ipairs(U.entries) do if x.left == "Thin Margin" then h2 = x end end
+            local dl = h2 and table.concat(h2.detail(), " | ") or ""
+            ok("deals: an unknown listed count is left out of the row and its detail", h2 and h2.sub == "below vendor price" and not plain(dl):find("listed", 1, true)
+                and plain(dl):find("AH lowest (Auctionator, today): 4s 40c each", 1, true), h2 and (h2.sub .. " / " .. plain(dl)))
+            n2.lookup = real
+        end
         ok("deals head counts them", plain(U.head:GetText()):find("below vendor price", 1, true), U.head:GetText())
         price(900002, was, 9)
         price(900001, 600, 50)                                   -- the history test above removed its price
@@ -491,6 +543,15 @@ do
         AHProfitDB.rec = { [X.me()] = { [5] = { n = "Test Blade", out = 900003, lo = 1, hi = 1, mats = { 900001, 1 }, prof = "Blacksmithing" } } }
         U.tabs.rec.scripts.OnClick[1]()
         ok("recipes tab shows profit per craft", #U.entries == 1 and U.entries[1].left == "Test Blade" and plain(U.entries[1].right) == "+3s 50c", U.entries[1] and plain(U.entries[1].right))
+        do  -- an unknown listed count (Auctionator) is left out of the recipe detail
+            local real = n2.lookup
+            n2.lookup = function(id) local p, q, t, s, f = real(id); if id == 900003 and p then return p, nil, W.time, "auctionator" end return p, q, t, s, f end
+            U.tabs.rec.scripts.OnClick[1]()
+            local rl = U.entries[1] and plain(table.concat(U.entries[1].detail(), " | ")) or ""
+            ok("recipes: an unknown listed count is left out of the detail", rl:find("Sells for", 1, true) and rl:find("Auctionator, today", 1, true) and not rl:find("listed", 1, true), rl)
+            n2.lookup = real
+            U.tabs.rec.scripts.OnClick[1]()
+        end
         AHProfitDB.bank = { [X.me()] = { t = W.time, items = { { 900001, 3, 0 } } } }
         U.tabs.bags.scripts.OnClick[1]()
         local nb = 0

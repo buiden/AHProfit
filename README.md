@@ -20,6 +20,12 @@ Each tooltip says which source the price is from and how old it is.
 
 Treat guild-shared and bundled prices as estimates: only your own recent scan reflects your auction house right now.
 
+With [Auctionator](https://www.curseforge.com/wow/addons/auctionator) installed, a price it saw today is used when
+neither you nor the guild has scanned the item, or the newest such scan is more than 24 hours old (before the bundled
+feed). Auctionator is not asked for an item missing from a complete scan of yours or the guild's made since
+Auctionator's day began. It is read through Auctionator's public API only; its listed count is not known, so none is shown.
+Auctionator fixes its day when it loads, so after midnight its new scans are not used until you `/reload`.
+
 ## Other features
 
 | Command | What it does |
@@ -34,6 +40,7 @@ Treat guild-shared and bundled prices as estimates: only your own recent scan re
 | `/ahp scan`, `/ahp scan stop` | Start or end a scan |
 | `/ahp auto on` / `off` | Scan by itself when the auction house opens |
 | `/ahp sync on` / `off` | Guild sharing |
+| `/ahp auctionator on` / `off` | Use Auctionator's prices when yours are missing or old (on by default when Auctionator is installed) |
 | `/ahp share` | Send your scanned prices to the guild now |
 | `/ahp on` / `off` | Tooltip lines |
 | `/ahp cut 5`, `/ahp cut 15` | The auction house cut in percent |

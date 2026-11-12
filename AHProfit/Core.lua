@@ -123,16 +123,63 @@ local function seedLookup(id)
     if i then return S.flat[i + 1], S.flat[i + 2], S.t end
 end
 
--- Returns price per unit (copper), quantity listed, time seen, source ("scan", "guild" or "feed") and, for "guild",
--- the sender's name. Order: your own scan when it is at most 2 hours old (always, whatever the feed's age or a
--- guild member's claim), then a guild member's scan newer than yours, then your older scan, then the bundled feed.
--- A scan older than the feed loses to the feed.
-local OWN_FRESH = 7200
+-- Auctionator (optional): its public API gives an item's latest lowest price and how many days ago it was seen
+-- (0 = today, by Auctionator's own day, which starts at local midnight). Only a price seen today is used, and only
+-- through pcall; without Auctionator, or with DB.useAuctionator == false, this returns nothing. No listed count is
+-- known; the time returned is the start of Auctionator's day, the earliest the price can be from. Answers are kept
+-- for a minute, so a list of thousands of items asks once per item.
+local AUC_ID, AUC_KEEP, DAY0_UTC = "AHProfit", 60, 1577836800
+local aucCache, aucAt, aucDay = {}, 0, 0
+local function aucDayStart(t)
+    local ok, day0 = pcall(time, { year = 2020, month = 1, day = 1, hour = 0 })
+    if not ok or type(day0) ~= "number" or day0 > t then day0 = DAY0_UTC end
+    return t - (t - day0) % 86400
+end
+local function auctionator(id)
+    if DB and DB.useAuctionator == false then return end
+    local api = type(Auctionator) == "table" and type(Auctionator.API) == "table" and Auctionator.API.v1
+    if type(api) ~= "table" or type(api.GetAuctionAgeByItemID) ~= "function" or type(api.GetAuctionPriceByItemID) ~= "function" then return end
+    local t = now()
+    -- Auctionator counts days on the computer's clock (time()), so its day start is taken from that clock too.
+    local okC, clock = pcall(time)
+    local ds = aucDayStart((okC and type(clock) == "number") and clock or t)
+    -- The cache is dropped after a minute and whenever Auctionator's day changes: an answer from before midnight
+    -- ("seen today") is not today's after it.
+    if t - aucAt > AUC_KEEP or t < aucAt or ds ~= aucDay then aucCache, aucAt, aucDay = {}, t, ds end
+    local c = aucCache[id]
+    if c == nil then
+        c = false
+        local ok, days = pcall(api.GetAuctionAgeByItemID, AUC_ID, id)
+        if ok and not secret(days) and days == 0 then
+            local ok2, p = pcall(api.GetAuctionPriceByItemID, AUC_ID, id)
+            if ok2 and not secret(p) and okNum(p, 1e12) and p > 0 then c = p end
+        end
+        aucCache[id] = c
+    end
+    if c then return c, ds end
+end
+ns.auctionatorPrice = auctionator
+
+-- Returns price per unit (copper), quantity listed, time seen, source ("scan", "guild", "auctionator" or "feed")
+-- and, for "guild", the sender's name. Order: your own scan when it is at most 2 hours old (always, whatever the
+-- feed's age or a guild member's claim), then a guild member's scan newer than yours, then your older scan, then
+-- the bundled feed. A scan older than the feed loses to the feed. When there is no scan of yours or the guild's, or
+-- the newest is more than 24 hours old, a price Auctionator saw today comes before them (its listed count is nil),
+-- unless a complete scan of yours or the guild's since Auctionator's day started did not have the item.
+local OWN_FRESH, AUC_AFTER = 7200, 86400
 local function lookup(id)
     local L, H = live(), shared()
     local lp, lt = L.p[id], L.t[id]
     if lp and now() - lt <= OWN_FRESH then return lp, L.q[id], lt, "scan" end
     local gp, gt = H.p[id], H.t[id]
+    local newest = math.max(lp and lt or 0, gp and gt or 0)
+    -- A complete scan (yours or the guild's) since Auctionator's day started is the whole truth: an item not in it
+    -- is not listed, and Auctionator's older sighting from the same day does not bring it back.
+    local okC, clock = pcall(time)                                 -- the computer's clock, as Auctionator counts days
+    if now() - newest > AUC_AFTER and math.max(L.full, H.full) <= aucDayStart((okC and type(clock) == "number") and clock or now()) then
+        local ap, at = auctionator(id)
+        if ap then return ap, nil, at, "auctionator" end
+    end
     local sp, sq, st = seedLookup(id)
     if sp and math.max(L.full, H.full) >= st then sp = nil end   -- a complete scan newer than the snapshot is the whole truth
     if sp and lp and lt < st then lp = nil end
@@ -142,8 +189,9 @@ local function lookup(id)
     if sp then return sp, sq, st, "feed" end
 end
 ns.lookup = lookup
--- How a price's source is shown: "scan 5m ago", "guild (Name, 20m ago)", "feed 1h ago".
+-- How a price's source is shown: "scan 5m ago", "guild (Name, 20m ago)", "Auctionator, today", "feed 1h ago".
 local function srcLabel(src, t, from)
+    if src == "auctionator" then return "Auctionator, today" end
     if src == "guild" then return "guild (" .. (type(from) == "string" and from or "a guild member") .. ", " .. age(t) .. ")" end
     return (src == "scan" and "scan " or "feed ") .. age(t)
 end
@@ -609,6 +657,10 @@ SlashCmdList["AHPROFIT"] = function(msg)
         else say("no scan is running.") end
     elseif msg == "on" or msg == "off" then DB.enabled = msg == "on"; say("tooltip lines " .. msg .. ".")
     elseif msg == "auto on" or msg == "auto off" then DB.autoscan = msg == "auto on"; say("scan when the auction house opens: " .. msg:sub(6) .. "." .. (DB.autoscan and " It stands still while you are on a Sell tab." or ""))
+    elseif msg == "auctionator on" or msg == "auctionator off" then
+        DB.useAuctionator = msg == "auctionator on"
+        say("Auctionator prices " .. msg:sub(13) .. "." .. ((DB.useAuctionator and not (type(Auctionator) == "table" and type(Auctionator.API) == "table")) and " Auctionator is not loaded." or ""))
+        if ns.ui then ns.ui:Refresh() end
     elseif msg == "sync on" or msg == "sync off" then DB.sync = msg == "sync on"; say("guild sharing " .. msg:sub(6) .. ".")
     elseif msg == "share" then if ns.sync then ns.sync.broadcast() end
     elseif msg == "cut 5" or msg == "cut 15" then DB.cut = tonumber(msg:sub(5)); say("cut set to " .. DB.cut .. "%."); if ns.ui then ns.ui:Refresh() end
@@ -620,6 +672,9 @@ SlashCmdList["AHPROFIT"] = function(msg)
         say("/ahp bags | session | session start | session stop | prices | deals | recipes | auctions")
         if ns.extra then say(ns.extra.nodeCount() .. " gathering nodes seen by you and your guild.") end
         if ns.sync then say(ns.sync.status()) end
-        say("/ahp farm | scan | scan stop | share | sync on | sync off | on | off | auto on | auto off | cut 5 | cut 15")
+        if type(Auctionator) == "table" and type(Auctionator.API) == "table" then
+            say("Auctionator: " .. (DB.useAuctionator == false and "off" or "on, its prices seen today fill in when yours are missing or over a day old") .. ".")
+        end
+        say("/ahp farm | scan | scan stop | share | sync on | sync off | auctionator on | auctionator off | on | off | auto on | auto off | cut 5 | cut 15")
     end
 end
