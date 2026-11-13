@@ -815,6 +815,68 @@ do
     ok("PR-G pick: a remembered pick is dropped once the scan is over 12 h old", since("H", "Aged", tg) == 1, since("H", "Aged", tg))
     aged.guild = false
     ow.guild = true
+    -- a picked owner that never sends is skipped; one more round picks the next owner
+    for _, cl in ipairs(clients) do cl.guild = false end
+    local hon, vic = offline("Honest2"), offline("Victim")
+    scan(hon, prices(9900)); run(60)
+    hon.guild, vic.guild = true, true
+    local function toVic(msg, from) fire(vic, "CHAT_MSG_ADDON", "AHProfit", msg, "GUILD", from .. "-Realm", "", 0, 0, "", 0) end
+    local tf = W.time
+    cur = vic; vic.ns.sync.ask()
+    local fakeT = math.floor(W.time)
+    toVic("O1," .. fakeT .. ",5000,0", "Faker")                  -- made up: newer than anyone's, never sent
+    run(6)
+    local function pickTimes(name) local o = {} for _, m in ipairs(W.log) do if m.from == "Victim" and m.at >= tf and m.msg:find("^P1," .. name .. ",") then o[#o + 1] = m.at - tf end end return o end
+    ok("PR-G skip: the fake newest offer is picked first", #pickTimes("Faker") == 1, #pickTimes("Faker"))
+    run(30)
+    toVic("O1," .. fakeT .. ",5000,0", "Faker")                  -- offers again in the next round: left out
+    run(15)
+    local ths = times("H", "Honest2", tf)
+    ok("PR-G skip: no header in 30 s, one more round, the honest owner sends within about 40 s", #ths == 1 and ths[1] - tf <= 45 and #pickTimes("Faker") == 1 and #pickTimes("Honest2") == 1,
+        tostring(ths[1] and (ths[1] - tf)) .. " " .. #pickTimes("Faker") .. " " .. #pickTimes("Honest2"))
+    run(120)
+    cur = vic; ok("PR-G skip: and the asker has the honest scan", G(vic).full == L(hon).full)
+    -- only one extra round per ask: if the next pick never sends either, no third ask
+    hon.guild = false
+    run(700); local tf2 = W.time
+    cur = vic; vic.ns.sync.ask()
+    toVic("O1," .. math.floor(W.time) .. ",5000,0", "FakeOne"); run(36)
+    toVic("O1," .. math.floor(W.time) .. ",5000,0", "FakeTwo"); run(80)
+    ok("PR-G skip: at most one extra round per ask", since("A", "Victim", tf2) == 2 and since("P", "Victim", tf2) == 2, since("A", "Victim", tf2) .. " " .. since("P", "Victim", tf2))
+    -- a skipped owner that offers a new scan time can be picked again
+    run(700); local tf3 = W.time
+    cur = vic; vic.ns.sync.ask()
+    local fakeT2 = math.floor(W.time)
+    toVic("O1," .. fakeT2 .. ",5000,0", "Faker"); run(6)
+    ok("PR-G skip: a skipped owner with a new scan time is eligible again", #pickTimes("Faker") == 2 and since("P", "Victim", tf3) == 1, #pickTimes("Faker"))
+    run(60)
+    -- an honest slow start (its header 25 s after the pick) is not skipped
+    run(700); local tf4 = W.time
+    cur = vic; vic.ns.sync.ask()
+    local slowT = math.floor(W.time)
+    toVic("O1," .. slowT .. ",3,0", "Slow"); run(6)
+    run(19)
+    local chS, nS = vic.ns.sync.encode({ p = { [7] = 70, [8] = 80, [9] = 90 }, q = {} })
+    toVic("H1,515151," .. slowT .. "," .. nS .. "," .. #chS, "Slow")
+    for i, pl in ipairs(chS) do toVic("D515151," .. i .. "," .. pl, "Slow") end
+    run(60)
+    ok("PR-G skip: an honest owner whose header comes 25 s after the pick is not skipped", since("A", "Victim", tf4) == 1 and since("P", "Victim", tf4) == 1 and G(vic).full == slowT,
+        since("A", "Victim", tf4) .. " " .. since("P", "Victim", tf4))
+    -- an owner still inside its 10 min says in its offer how long it waits, and is not skipped meanwhile
+    hon.guild = true; run(700)
+    local tw5 = W.time
+    cur = hon; hon.ns.sync.broadcast(true); run(60)               -- its window starts
+    G(vic).full = 0
+    for id in pairs(G(vic).t) do G(vic).t[id] = 0 end                -- the asker lost the scan (as after a cut)
+    cur = vic; vic.ns.sync.ask(); run(6)
+    local waitSeen
+    for _, m in ipairs(W.log) do if m.from == "Honest2" and m.at >= tw5 and m.msg:sub(1, 1) == "O" then waitSeen = tonumber(m.msg:match(",(%d+)$")) end end
+    ok("PR-G skip: an owner inside its window offers with the seconds it waits", waitSeen and waitSeen > 400 and waitSeen <= 600, tostring(waitSeen))
+    run(120)
+    ok("PR-G skip: ...and the asker does not skip it or ask again meanwhile", since("A", "Victim", tw5) == 1 and since("P", "Victim", tw5) == 1)
+    run(500)
+    ok("PR-G skip: ...the scan arrives at the window's end", since("H", "Honest2", tw5) == 2 and G(vic).full == L(hon).full, since("H", "Honest2", tw5))
+    vic.guild, hon.guild = false, false
     -- unknown kinds are ignored without an error and without a reply
     local tu = W.time
     local okU = pcall(function()

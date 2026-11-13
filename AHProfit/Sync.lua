@@ -8,7 +8,8 @@
 --   D<session>,<chunk number>,<payload>               items: id step, price, quantity as base-32 digits
 --   Q<ver>,<newest prices I have>                     sent by 0.6.0 at login; one member with newer prices answers
 --   A<ver>,<newest prices I have>                     ask (0.6.1 on): at login, about once an hour, 30 s after a cut
---   O<ver>,<scan time>,<items>                        offer: each owner of a newer complete scan, no prices
+--   O<ver>,<scan time>,<items>,<wait>                 offer: each owner of a newer complete scan, no prices; <wait>
+--                                                     = seconds until it may send that scan again (its 10 min)
 --   P<ver>,<owner>,<scan time>                        pick: the asker names the newest offer; only that owner sends
 --   An owner answers a Q or a pick at most once per 10 min; one that comes while it is sending is served once
 --   the 10 min are up.
@@ -144,11 +145,11 @@ function Y.broadcast(quiet)
     pump(out)
     return true
 end
-function Y.ask()
+function Y.ask(retry)
     if not on() or not inGuild() then return end
     local L, H = ns.live(), ns.shared()
     local have = math.floor(math.max(L.full, H.full, ns.seed and ns.seed.t or 0))
-    if send("A" .. VER .. "," .. have) then lastAsk = ns.now(); startRound(have) end
+    if send("A" .. VER .. "," .. have) then lastAsk = ns.now(); startRound(have, retry) end
 end
 -- Answering: one broadcast per 10 min at most. A member who asked while a broadcast was running missed its start,
 -- so it is sent again once the 10 min are up.
@@ -340,7 +341,7 @@ end
 -- Asks from 0.6.1 on: ASK -> every owner of a newer complete scan OFFERs it (no prices) -> the asker PICKs the newest
 -- (equal times: the lowest name, so every asker picks the same owner) -> only that owner broadcasts. 0.6.0 owners
 -- ignore A, O and P, so they are not picked until they update; their own Q asks are still answered above.
-local OFFERWAIT, COLLECT = 3, 5
+local OFFERWAIT, COLLECT, RESEND = 3, 5, 600
 local round, heard, lastOffer, askedAt = nil, {}, nil, {}
 local sentT, sentAt = nil, -1e9                                  -- the last scan broadcast, and when it began
 local function ownCount(L)
@@ -361,33 +362,63 @@ local function offerFor(have, who)                               -- someone aske
         local L2 = ns.live()
         if L2.full ~= t or not on() or not inGuild() then return end
         local n = ownCount(L2)
-        if n > 0 then send("O" .. VER .. "," .. t .. "," .. n) end  -- nothing to send: no offer, so it cannot be picked
+        if n == 0 then return end                                -- nothing to send: no offer, so it cannot be picked
+        local wait = (sentT == t) and math.max(0, math.ceil(sentAt + RESEND - ns.now())) or 0
+        send("O" .. VER .. "," .. t .. "," .. n .. "," .. math.min(wait, RESEND))
     end)
 end
-local function offerSeen(name, t, n)
+local function offerSeen(name, t, n, wait)
     local now = ns.now()
     if not (whole(t, now + AHEAD) and t >= now - BEHIND and whole(n, 1e7) and n > 0) then return end
+    wait = math.min(whole(wait, 1e6) and wait or 0, 600)
     heard[name] = { t = t, n = n, at = now }
     local count, oldest = 0, nil
     for k, v in pairs(heard) do count = count + 1; if not oldest or v.at < heard[oldest].at then oldest = k end end
     if count > 20 then heard[oldest] = nil end
     if round and t > round.have then
         local o = round.offers[name]
-        if not o or t > o then round.offers[name] = t end
+        if not o or t > o then round.offers[name] = t; round.waits[name] = wait end
     end
+end
+-- An owner that was picked but sends nothing (a made-up offer, or a client that broke) is skipped: if neither its
+-- header nor any of its chunks is heard within 30 s, that owner and scan time are left out, and one more round is
+-- asked at once (only one per ask). The skip lasts until the owner offers another scan time, its header for that
+-- scan is heard after all, or 12 h. Chunks count as alive: an owner still sending sends the scan again later.
+local WATCH = 30
+local skipped, watch = {}, nil
+local function isSkipped(name, t)
+    local sk = skipped[name]
+    if not sk then return false end
+    if sk.t ~= t or ns.now() - sk.at > 43200 then skipped[name] = nil; return false end
+    return true
 end
 local function finishRound(r)
     if round ~= r then return end
     round = nil
     local best, bt
     for name, t in pairs(r.offers) do
-        if not bt or t > bt or (t == bt and name < best) then best, bt = name, t end
+        if not isSkipped(name, t) and (not bt or t > bt or (t == bt and name < best)) then best, bt = name, t end
     end
-    if best and on() and inGuild() then send("P" .. VER .. "," .. best .. "," .. bt) end
+    if not (best and on() and inGuild()) then return end
+    if not send("P" .. VER .. "," .. best .. "," .. bt) then return end
+    local w = { owner = best, t = bt, retry = r.retry }
+    watch = w
+    C_Timer.After(WATCH + (r.waits[best] or 0), function()       -- an owner inside its 10 min said how long it waits
+        if watch ~= w then return end
+        watch = nil
+        if w.alive then return end
+        skipped[w.owner] = { t = w.t, at = ns.now() }
+        if not w.retry and on() and inGuild() then Y.ask(true) end     -- one more round, leaving that owner out
+    end)
+end
+-- Every H or D from the owner being watched shows it is sending; its H for the picked scan also clears a skip.
+local function heardFrom(who, t)
+    if watch and who == watch.owner and (t == nil or t == watch.t) then watch.alive = true end
+    if t and skipped[who] and skipped[who].t == t then skipped[who] = nil end
 end
 function Y.sent(t) sentT, sentAt = t, ns.now() end
-startRound = function(have)
-    local r = { have = have, offers = {} }
+startRound = function(have, retry)
+    local r = { have = have, offers = {}, waits = {}, retry = retry }
     round = r
     C_Timer.After(COLLECT, function() finishRound(r) end)
 end
@@ -396,7 +427,7 @@ end
 -- current scan and under 12 h old; so a member cut by a /reload, or who logged in just after a broadcast, has it
 -- within about 10 min. A pick from a member who asked before that broadcast began is not remembered: it was in the
 -- same round and has the scan.
-local RESEND, queued, queueTimer = 600, nil, false
+local queued, queueTimer = nil, false
 local function resend()
     queueTimer = false
     local L, now = ns.live(), ns.now()
@@ -431,10 +462,10 @@ function Y.receive(prefix, text, channel, sender)
     local k = text:sub(1, 1)
     if k == "D" then
         local sid, seq, payload = text:match("^D(%d%d%d%d%d%d),(%d%d?%d?%d?),([%w+/]+)$")
-        if sid then chunk(sender, tonumber(sid), tonumber(seq), payload) end
+        if sid then heardFrom(who); chunk(sender, tonumber(sid), tonumber(seq), payload) end
     elseif k == "H" then
         local ver, sid, t, n, chunks = text:match("^H(%d%d?),(%d%d%d%d%d%d),(%d%d?%d?%d?%d?%d?%d?%d?%d?%d?%d?),(%d%d?%d?%d?%d?),(%d%d?%d?%d?)$")
-        if ver then header(sender, tonumber(ver), tonumber(sid), tonumber(t), tonumber(n), tonumber(chunks)) end
+        if ver then heardFrom(who, tonumber(t)); header(sender, tonumber(ver), tonumber(sid), tonumber(t), tonumber(n), tonumber(chunks)) end
     elseif k == "Q" then
         local ver, have = text:match("^Q(%d%d?),(%d%d?%d?%d?%d?%d?%d?%d?%d?%d?%d?)$")
         if ver and tonumber(ver) == VER then request(tonumber(have)) end
@@ -442,8 +473,8 @@ function Y.receive(prefix, text, channel, sender)
         local ver, have = text:match("^A(%d%d?),(%d%d?%d?%d?%d?%d?%d?%d?%d?%d?%d?)$")
         if ver and tonumber(ver) == VER then offerFor(tonumber(have), who) end
     elseif k == "O" then
-        local ver, t, n = text:match("^O(%d%d?),(%d%d?%d?%d?%d?%d?%d?%d?%d?%d?%d?),(%d%d?%d?%d?%d?%d?%d?)$")
-        if ver and tonumber(ver) == VER then offerSeen(who, tonumber(t), tonumber(n)) end
+        local ver, t, n, wait = text:match("^O(%d%d?),(%d%d?%d?%d?%d?%d?%d?%d?%d?%d?%d?),(%d%d?%d?%d?%d?%d?%d?),?(%d?%d?%d?%d?)$")
+        if ver and tonumber(ver) == VER then offerSeen(who, tonumber(t), tonumber(n), tonumber(wait)) end
     elseif k == "P" then
         local ver, owner, t = text:match("^P(%d%d?),([^,]+),(%d%d?%d?%d?%d?%d?%d?%d?%d?%d?%d?)$")
         if ver and tonumber(ver) == VER and #owner <= 64 then picked(owner, tonumber(t), who) end
