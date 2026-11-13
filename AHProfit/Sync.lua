@@ -95,10 +95,14 @@ function Y.decode(s)
 end
 
 -- ----------------------------------------------------------------------------------------------------- sending --
-local out, again, pending = nil, false, nil
+local out, pending = nil, nil
 local ASKGAP, HOUR, JITTER, CUTWAIT = 600, 3600, 300, 30      -- asks: at most one per 10 min, hourly +-5 min, 30 s after a cut
-local lastAsk, lastAnswer, nextCheck, reask, cut = -1e9, -1e9, nil, false, nil
-local busy, mine, startRound                                 -- defined further down
+local lastAsk, nextCheck, reask, cut = -1e9, nil, false, nil
+local busy, mine, startRound, onDone                         -- defined further down
+-- The scan last broadcast and when its header actually went out (its 10-min window starts then), and the local order
+-- of asks and headers: an ask heard after the header went out is a later round, whatever the server clock says.
+local sentT, sentAt, seq, sentSeq, queued = nil, -1e9, 0, -1, nil
+local askedAt = {}
 local function inGuild() return IsInGuild ~= nil and IsInGuild() and true or false end
 -- true = sent; false = try again later.
 local function send(msg)
@@ -112,11 +116,15 @@ local function pump(job)
     if out ~= job then return end
     if not on() or not inGuild() then out = nil; return end
     if send(job.msgs[job.i]) then
+        if job.i == 1 then                                       -- the header is out: the window starts now
+            sentT, sentAt, sentSeq = job.t, ns.now(), seq
+            if queued == job.t then queued = nil end             -- this broadcast serves a remembered pick or Q
+        end
         job.i, job.fails = job.i + 1, 0
         if job.i > #job.msgs then
             out = nil
             ns.say("scan shared with your guild (" .. job.n .. " items).")
-            if again then Y.answerLater() end
+            if onDone then onDone(job) end
             return
         end
         C_Timer.After(GAP, function() pump(job) end)
@@ -126,8 +134,9 @@ local function pump(job)
         C_Timer.After(5, function() pump(job) end)
     end
 end
--- Sends this player's last full scan to the guild. quiet = no chat line when there is nothing to do.
-function Y.broadcast(quiet)
+-- Sends this player's last full scan to the guild. quiet = no chat line when there is nothing to do (the share after
+-- a scan); kind "answer" = an answer to a pick or Q.
+function Y.broadcast(quiet, kind)
     pending = nil
     if not on() then if not quiet then ns.say("guild sharing is off (/ahp sync on).") end return false end
     if not inGuild() then if not quiet then ns.say("you are not in a guild.") end return false end
@@ -138,9 +147,7 @@ function Y.broadcast(quiet)
     local sid = math.random(100000, 999999)
     local msgs = { "H" .. VER .. "," .. sid .. "," .. L.full .. "," .. n .. "," .. #chunks }
     for i = 1, #chunks do msgs[i + 1] = "D" .. sid .. "," .. i .. "," .. chunks[i] end
-    out = { msgs = msgs, i = 1, fails = 0, n = n, t = L.full, started = ns.now() }
-    Y.sent(L.full)
-    again = false
+    out = { msgs = msgs, i = 1, fails = 0, n = n, t = L.full, started = ns.now(), auto = quiet and kind ~= "answer" }
     if not quiet then ns.say("sharing " .. n .. " prices with your guild, about " .. math.ceil(#msgs * GAP / 60) .. " min.") end
     pump(out)
     return true
@@ -150,16 +157,6 @@ function Y.ask(retry)
     local L, H = ns.live(), ns.shared()
     local have = math.floor(math.max(L.full, H.full, ns.seed and ns.seed.t or 0))
     if send("A" .. VER .. "," .. have) then lastAsk = ns.now(); startRound(have, retry) end
-end
--- Answering: one broadcast per 10 min at most. A member who asked while a broadcast was running missed its start,
--- so it is sent again once the 10 min are up.
-function Y.answerLater()
-    local wait = lastAnswer + ASKGAP - ns.now()
-    local function go()
-        if not again or out then return end
-        again = false; lastAnswer = ns.now(); Y.broadcast(true)
-    end
-    if wait <= 0 then go() else C_Timer.After(wait, go) end
 end
 -- Asking again: about once an hour, so a member who stays online after a cut transfer, or who logged in while the
 -- scan's owner was offline, still gets the newest prices. Nothing is sent while a transfer runs either way or
@@ -338,26 +335,25 @@ local function chunk(sender, sid, seq, payload)
     DB.syncFrom, DB.syncAt = name, t
     ns.say("prices updated from " .. DB.syncFrom .. "'s scan (" .. ns.age(t) .. "), " .. r.stored .. " items.")
 end
-local function request(have)
-    if out then if out.t > have then again = true end return end
+local want                                                       -- (below) the gate for every answer
+local function noteAsk(who)                                      -- when, and in which local order, each member asked
+    local now, n = ns.now(), 0
+    for k, a in pairs(askedAt) do if now - a.at > 900 then askedAt[k] = nil else n = n + 1 end end
+    seq = seq + 1
+    if n < 50 or askedAt[who] then askedAt[who] = { at = now, n = seq } end
+end
+-- Q from 0.6.0: answered through the same 10-min window as a pick.
+local function request(have, who)
     local L = ns.live()
     if L.full <= have or ns.now() - L.full > 43200 then return end
-    if ns.now() - lastAnswer < ASKGAP then return end           -- answered in the last 10 min: the hourly ask comes back
-    local tok = {}
-    pending = tok
-    -- Only your own scan is sent. When a guild member's newer scan is known here, its owner gets the first chance
-    -- to answer (seeing their reply cancels this one).
-    local wait = ns.shared().full > L.full and 12 or 2
-    C_Timer.After(wait + math.random() * 8, function()
-        if pending == tok and not out then lastAnswer = ns.now(); Y.broadcast(true) end
-    end)
+    noteAsk(who)
+    want(L.full, who, true)
 end
 -- Asks from 0.6.1 on: ASK -> every owner of a newer complete scan OFFERs it (no prices) -> the asker PICKs the newest
 -- (equal times: the lowest name, so every asker picks the same owner) -> only that owner broadcasts. 0.6.0 owners
 -- ignore A, O and P, so they are not picked until they update; their own Q asks are still answered above.
 local OFFERWAIT, COLLECT, RESEND = 3, 5, 600
-local round, heard, lastOffer, askedAt, lastQ = nil, {}, nil, {}, -1e9
-local sentT, sentAt = nil, -1e9                                  -- the last scan broadcast, and when it began
+local round, heard, lastOffer, lastQ = nil, {}, nil, -1e9
 local function ownCount(L)
     local n = 0
     for id, p in pairs(L.p) do if whole(id, 1e7) and id > 0 and whole(p, 1e12) and p > 0 then n = n + 1 end end
@@ -365,9 +361,7 @@ local function ownCount(L)
 end
 local function offerFor(have, who)                               -- someone asked: offer your scan if it is newer
     local L, now = ns.live(), ns.now()
-    local n = 0
-    for k, at in pairs(askedAt) do if now - at > 900 then askedAt[k] = nil else n = n + 1 end end
-    if n < 50 then askedAt[who] = now end                        -- when each member last asked (see picked)
+    noteAsk(who)                                                 -- (see want)
     if L.full <= have or now - L.full > 43200 then return end
     if lastOffer and lastOffer.t == L.full and now - lastOffer.at < COLLECT then return end   -- one offer per round
     lastOffer = { t = L.full, at = now }
@@ -391,6 +385,8 @@ local function offerSeen(name, t, n, wait)
     if count > 20 then heard[oldest] = nil end
     if round and t > round.have then
         local o = round.offers[name]
+        if not o and round.n >= 50 then return end               -- at most 50 offers per round
+        if not o then round.n = round.n + 1 end
         if not o or t > o then round.offers[name] = t; round.waits[name] = wait end
     end
 end
@@ -438,26 +434,30 @@ local function heardFrom(who, t)
     if watch and who == watch.owner and (t == nil or t == watch.t) then watch.alive = true end
     if t and skipped[who] and skipped[who].t == t then skipped[who] = nil end
 end
-function Y.sent(t) sentT, sentAt = t, ns.now() end
+function Y.sent(t) sentT, sentAt, sentSeq = t, ns.now(), seq end
 startRound = function(have, retry)
-    local r = { have = have, offers = {}, waits = {}, retry = retry }
+    local r = { have = have, offers = {}, waits = {}, retry = retry, n = 0 }
     -- Offers heard in the last 5 s count too: their owners do not offer again so soon, and askers a second or two
     -- apart must pick the same owner.
     local now = ns.now()
     for name, v in pairs(heard) do
         if now - v.at <= COLLECT and v.t > have and now - v.t < 43200 then
             r.offers[name], r.waits[name] = v.t, math.max(0, (v.wait or 0) - math.floor(now - v.at))
+            r.n = r.n + 1
         end
     end
     round = r
     C_Timer.After(COLLECT, function() finishRound(r) end)
 end
--- Picked: each scan goes out at most once per 10 min (its window starts with any broadcast of it). A pick inside the
--- window is remembered (one per scan) and that scan is sent once more when the window ends, if it is still the
--- current scan and under 12 h old; so a member cut by a /reload, or who logged in just after a broadcast, has it
--- within about 10 min. A pick from a member who asked before that broadcast began is not remembered: it was in the
--- same round and has the scan.
-local queued, queueTimer = nil, false
+-- Answering, one gate for picks and Q: each scan goes out at most once per 10 min, the window starting when a
+-- broadcast's header goes out. A pick or Q inside the window is remembered (one per scan) and the scan is sent once
+-- more when the window ends, if it is still the current scan and under 12 h old; so a member cut by a /reload, or who
+-- logged in just after a broadcast, has it within about 10 min. One heard while the share after a scan is still
+-- going out is served right after it instead (a fresh scan goes out at most twice in its first 10 min), and the
+-- window starts again from that re-send. A member who asked before the header went out was in the same round and
+-- has the scan. Any broadcast of the scan clears what was remembered.
+local queueTimer = false
+local function answerNow() pending = nil; return Y.broadcast(true, "answer") end
 local function resend()
     queueTimer = false
     local L, now = ns.live(), ns.now()
@@ -465,24 +465,46 @@ local function resend()
     local wait = 30                                              -- still sending: look again shortly
     if not out then
         wait = (sentT == queued) and (sentAt + RESEND - now) or 0
-        if wait <= 0 then queued = nil; pending = nil; lastAnswer = now; Y.broadcast(true); return end
+        if wait <= 0 then queued = nil; answerNow(); return end
     end
     queueTimer = true
     C_Timer.After(wait, resend)
 end
-local function picked(owner, t, who)
-    if not mine(owner) then return end                           -- someone else was picked
+onDone = function(job)                                           -- a broadcast finished
+    if not (job.auto and queued == job.t) then return end
+    local L = ns.live()
+    if queued ~= L.full or ns.now() - queued > 43200 or not on() or not inGuild() then return end
+    queued = nil; answerNow()
+end
+want = function(t, who, viaQ)
     local L, now = ns.live(), ns.now()
     if t ~= L.full or now - t > 43200 then return end            -- not the scan this owner has now, or too old
     local open = out or (sentT == t and now - sentAt < RESEND)
-    if not open then pending = nil; lastAnswer = now; Y.broadcast(true); return end
-    if sentT == t and (askedAt[who] or -1e9) <= sentAt then return end   -- in that broadcast's round: has it
+    if not open then
+        if not viaQ then answerNow(); return end
+        -- Q, as in 0.6.0: a short random wait, so one of the members who could answer does; another's header for
+        -- this scan or newer cancels it. When a guild member's newer scan is known here, its owner goes first.
+        local tok = {}
+        pending = tok
+        C_Timer.After((ns.shared().full > L.full and 12 or 2) + math.random() * 8, function()
+            if pending == tok then pending = nil; want(t, who, false) end
+        end)
+        return
+    end
+    local a = askedAt[who]
+    if sentT == t and (not a or a.n <= sentSeq) then return end  -- asked before the header went out: has it
     queued = t
+    if out and out.auto and out.t == t then return end           -- served right after the share (onDone)
     if not queueTimer then
         queueTimer = true
         C_Timer.After(out and 30 or (sentAt + RESEND - now), resend)
     end
 end
+local function picked(owner, t, who)
+    if not mine(owner) then return end                           -- someone else was picked
+    want(t, who, false)
+end
+
 function Y.receive(prefix, text, channel, sender)
     if secret(prefix) or secret(text) or secret(channel) or secret(sender) then return end
     if prefix ~= PFX or channel ~= "GUILD" or type(text) ~= "string" or type(sender) ~= "string" or #text > 255 then return end
@@ -498,7 +520,7 @@ function Y.receive(prefix, text, channel, sender)
         if ver then heardFrom(who, tonumber(t)); header(sender, tonumber(ver), tonumber(sid), tonumber(t), tonumber(n), tonumber(chunks)) end
     elseif k == "Q" then
         local ver, have = text:match("^Q(%d%d?),(%d%d?%d?%d?%d?%d?%d?%d?%d?%d?%d?)$")
-        if ver and tonumber(ver) == VER then request(tonumber(have)) end
+        if ver and tonumber(ver) == VER then request(tonumber(have), who) end
     elseif k == "A" then
         local ver, have = text:match("^A(%d%d?),(%d%d?%d?%d?%d?%d?%d?%d?%d?%d?%d?)$")
         if ver and tonumber(ver) == VER then offerFor(tonumber(have), who) end

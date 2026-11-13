@@ -617,10 +617,12 @@ do
     end
     run(40)
     ok("PR-G: five asks within 10 min, one broadcast", since("H", "Banker", ta) == 1, since("H", "Banker", ta))
-    run(30)                                                      -- now past 10 min since the answer
+    run(30)                                                      -- the 10-min mark of the answer
+    ok("PR-G: the asks inside the window are served by one re-send at its end", since("H", "Banker", ta) == 2, since("H", "Banker", ta))
+    run(700)
     local tb = W.time
     fire(own3, "CHAT_MSG_ADDON", "AHProfit", "Q1,0", "GUILD", "Asker6-Realm", "", 0, 0, "", 0); run(30)
-    ok("PR-G: an ask after 10 min is answered", since("H", "Banker", tb) == 1, since("H", "Banker", tb))
+    ok("PR-G: an ask outside the window is answered at once", since("H", "Banker", tb) == 1, since("H", "Banker", tb))
     -- an ask during a running broadcast is served, but not before the 10 min are up
     local huge = {}
     for i = 1, 3000 do huge[i] = R(70000 + i * 7, 500 + i, 1) end
@@ -747,7 +749,7 @@ do
     run(500)
     ok("PR-G pick: ...it is served once 10 min after the answer", since("H", "Holder", ts2) == 1, since("H", "Holder", ts2))
     -- the live case: a reload in the middle of a large broadcast (shared after a scan); the re-ask at login comes
-    -- while the owner is still sending, so it is sent again right after (no answer in the last 10 min)
+    -- while the owner is still sending, so it is sent again right after the share (round 2, item 6)
     run(700)
     local big2, viewer = offline("BigOwner"), offline("Viewer")
     local bigP = {}
@@ -765,10 +767,10 @@ do
     local tv = W.time
     run(45)                                                      -- the re-ask 30-40 s after the login
     cur = big2; ok("PR-G live: the re-ask and pick arrive while the owner is still sending", since("P", "Viewer", tv) == 1 and big2.ns.sync.status():find("Sending your scan now", 1, true) ~= nil, since("P", "Viewer", tv))
-    run(470)
-    ok("PR-G live: nothing more before the scan's 10-min mark", since("H", "BigOwner", tv) == 0, since("H", "BigOwner", tv))
-    run(200)                                                     -- re-sent at about 582 s; 3,000 items take about 95 s
-    ok("PR-G live: re-sent once at the 10-min mark, and the reloaded member has the whole scan", since("H", "BigOwner", tv) == 1 and G(v2).full == L(big2).full, since("H", "BigOwner", tv))
+    run(180 - 45 - 18)                                           -- 3 min after the cut (18 s into the transfer)
+    ok("PR-G live: re-sent once right after the share; the reloaded member has the whole scan within about 3 min", since("H", "BigOwner", tv) == 1 and G(v2).full == L(big2).full, since("H", "BigOwner", tv) .. " " .. G(v2).full - L(big2).full)
+    run(1200)
+    ok("PR-G live: ...and nothing more", since("H", "BigOwner", tv) == 1, since("H", "BigOwner", tv))
     big2.guild, v2.guild = false, false
     -- no offer when the scan is not newer than the asker's, or more than 12 h old
     ow.guild = true
@@ -1059,6 +1061,82 @@ do
     run(300)
     fire(tgt, "CHAT_MSG_ADDON", "AHProfit", "H1,300099," .. math.floor(W.time) .. ",50,2", "GUILD", "Noisy-Realm", "", 0, 0, "", 0)
     ok("receiving line: again after 10 min", said("Target", "receiving prices from Noisy", c9) == 2)
+    alone()
+end
+
+-- ---- PR-G review round 2 (مانع): one window for picks and Q, from the header actually going out
+do
+    local function hs(from, t0) local o = {} for _, m in ipairs(W.log) do if m.msg:sub(1, 1) == "H" and m.from == from and m.at >= t0 then o[#o + 1] = math.floor(m.at - t0 + 0.5) end end return o end
+    local function alone() for _, cl in ipairs(clients) do cl.guild = false end end
+    local function to(c, msg, from) fire(c, "CHAT_MSG_ADDON", "AHProfit", msg, "GUILD", from .. "-Realm", "", 0, 0, "", 0) end
+    local function items(base, n) local r = {} for i = 1, n do r[i] = R(base + i * 3, 300 + i, 1) end return r end
+    local function str(t) return table.concat(t, ",") end
+    alone(); run(700)
+    local o = client("Owner2"); run(30)
+    local function fresh(name) alone(); run(700); o = client(name); run(30) end   -- a fresh owner: each scan complete
+    -- item 1: a Q after the share is remembered and served at the window's end, not at once
+    local t1 = W.time
+    scan(o, items(400000, 400)); run(120)
+    to(o, "Q1,0", "OldAsker"); run(1300)
+    local h1 = hs("Owner2", t1)
+    ok("R2-1: share at 0, Q at 120 s: the Q is served at the window's end", #h1 == 2 and h1[2] >= 595 and h1[2] <= 615, str(h1))
+    -- item 1 / 6: a Q while the share is going out: once, right after it; then nothing until the window's end
+    fresh("OwnerB"); local t2 = W.time
+    scan(o, items(410000, 3000)); run(20)
+    to(o, "Q1,0", "OldAsker2"); run(1300)
+    local h2 = hs("OwnerB", t2)
+    ok("R2-1: Q 20 s into the share: one re-send right after it, then nothing", #h2 == 2 and h2[2] < 150, str(h2))
+    -- item 2: any broadcast of the scan clears a remembered pick
+    fresh("OwnerC"); local t3 = W.time
+    scan(o, items(420000, 400)); run(100)
+    to(o, "A1,0", "LatePick"); to(o, "P1,OwnerC," .. L(o).full, "LatePick"); run(200)
+    cur = o; o.slash("share"); run(1300)
+    local h3 = hs("OwnerC", t3)
+    ok("R2-2: share at 0, pick at 100 s, /ahp share at 300 s: no third broadcast", #h3 == 2, str(h3))
+    -- item 3: the window starts when the header goes out, not when the broadcast is queued
+    fresh("OwnerD"); o.guild = false; scan(o, items(425000, 400)); run(30); o.guild = true   -- a scan not shared
+    local t4 = W.time
+    W.fail = 30; to(o, "A1,0", "Starter"); to(o, "P1,OwnerD," .. L(o).full, "Starter"); run(200); W.fail = 0
+    local h4 = hs("OwnerD", t4)
+    run((h4[1] or 0) + 560 - (W.time - t4))
+    to(o, "A1,0", "Inside"); to(o, "P1,OwnerD," .. L(o).full, "Inside"); run(10)
+    ok("R2-3: refused sends delay the header; a pick 560 s after it is inside the window", #h4 == 1 and h4[1] >= 140 and #hs("OwnerD", t4) == 1, str(hs("OwnerD", t4)))
+    run(100)
+    ok("R2-3: ...and served at the window's end", #hs("OwnerD", t4) == 2, str(hs("OwnerD", t4)))
+    -- item 4: an ask heard after the header went out, in the same server second, is a later round
+    fresh("OwnerE"); o.guild = false; scan(o, items(428000, 400)); run(30); o.guild = true
+    W.time = math.floor(W.time) + 1.1; local t5 = W.time
+    to(o, "A1,0", "Early"); to(o, "P1,OwnerE," .. L(o).full, "Early")   -- answered at once: header at x.1
+    run(0.5)
+    to(o, "A1,0", "SameSecond"); to(o, "P1,OwnerE," .. L(o).full, "SameSecond")
+    run(700)
+    local h5 = hs("OwnerE", t5)
+    ok("R2-4: an ask after the header in the same second is served at the window's end", #h5 == 2 and h5[2] >= 595 and h5[2] <= 615, str(h5))
+    -- item 5: at most 50 offers per round
+    run(700)
+    local asker = client("Collector"); run(30)
+    cur = asker; asker.ns.sync.ask()
+    local base = math.floor(W.time) - 1000
+    for i = 1, 60 do to(asker, "O1," .. (base + i) .. ",100,0", "Off" .. string.format("%02d", i)) end
+    local t6 = W.time; run(6)
+    local p
+    for _, m in ipairs(W.log) do if m.from == "Collector" and m.at >= t6 and m.msg:sub(1, 1) == "P" then p = m.msg end end
+    ok("R2-5: offers past the 50th in a round are dropped", p ~= nil and p:find("^P1,Off50,") ~= nil, tostring(p))
+    alone(); run(100)
+    -- item 6: five picks while the share goes out: exactly one re-send right after it, then nothing until the end
+    fresh("Owner3"); local t7 = W.time
+    scan(o, items(430000, 3000)); run(10)
+    for i = 1, 5 do to(o, "A1,0", "During" .. i); to(o, "P1,Owner3," .. L(o).full, "During" .. i); run(12) end
+    run(200)
+    local h7 = hs("Owner3", t7)
+    ok("R2-6: five picks during the share: exactly one re-send, right after it", #h7 == 2 and h7[2] < 150, str(h7))
+    to(o, "A1,0", "After"); to(o, "P1,Owner3," .. L(o).full, "After")
+    run((h7[2] or 0) + 590 - (W.time - t7))
+    ok("R2-6: ...then nothing until the window's end", #hs("Owner3", t7) == 2, str(hs("Owner3", t7)))
+    run(100)
+    ok("R2-6: ...where the pick heard meanwhile is served once", #hs("Owner3", t7) == 3, str(hs("Owner3", t7)))
+    run(1300)
+    ok("R2-6: ...and nothing more", #hs("Owner3", t7) == 3, str(hs("Owner3", t7)))
     alone()
 end
 print(pass .. " passed, " .. fail .. " failed")
