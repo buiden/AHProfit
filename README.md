@@ -86,7 +86,7 @@ It also keeps, in its saved variables, records for tools outside the game (the R
 Lua 5.1, from the repository root:
 
 ```sh
-for t in harness ui_test sync_test extra_test ledger_test bagfull_test progress_test; do lua5.1 test/$t.lua; done
+for t in harness ui_test sync_test extra_test ledger_test bagfull_test progress_test writs_test; do lua5.1 test/$t.lua; done
 ```
 
 ## License
