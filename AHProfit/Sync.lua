@@ -387,7 +387,9 @@ local function offerSeen(name, t, n, wait)
         local o = round.offers[name]
         if not o and round.n >= 50 then return end               -- at most 50 offers per round
         if not o then round.n = round.n + 1 end
-        if not o or t > o then round.offers[name] = t; round.waits[name] = wait end
+        -- a repeat at the same time lowers the wait (3 then 0: ready now), never raises it: an owner that began sending
+        -- just after offering 0 offers again with its 10 min, and the asker is in that broadcast's round
+        if not o or t > o or (t == o and wait < (round.waits[name] or 0)) then round.offers[name] = t; round.waits[name] = wait end
     end
 end
 -- An owner that was picked but sends nothing (a made-up offer, or a client that broke) is skipped: if neither its

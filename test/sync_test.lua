@@ -1237,6 +1237,19 @@ do
     local tt = math.floor(W.time) - 10
     to(v, "O1," .. tt .. ",500,400", "Aaron"); to(v, "O1," .. tt .. ",500,0", "Zed"); run(6)
     ok("(b) equal scan times: the owner with wait 0 is picked over a lower name", picks("Victim3", tb)[1] == "Zed", tostring(picks("Victim3", tb)[1]))
+    -- a repeated offer at the same time refreshes its wait: the owner now ready wins
+    run(700); local tr = W.time
+    cur = v; v.ns.sync.ask()
+    local tq = math.floor(W.time) - 10
+    to(v, "O1," .. tq .. ",500,3", "Zeta"); to(v, "O1," .. tq .. ",500,201", "Alpha"); run(2)
+    to(v, "O1," .. tq .. ",500,0", "Zeta"); run(4)
+    ok("a repeated offer at the same time updates the wait; the owner with wait 0 wins", picks("Victim3", tr)[1] == "Zeta", tostring(picks("Victim3", tr)[1]))
+    run(700); local tr2 = W.time
+    cur = v; v.ns.sync.ask()
+    local tq2 = math.floor(W.time) - 10
+    to(v, "O1," .. tq2 .. ",500,0", "Zeta"); to(v, "O1," .. tq2 .. ",500,0", "Alpha"); run(2)
+    to(v, "O1," .. tq2 .. ",500,600", "Alpha"); run(4)                -- Alpha began sending and offers again
+    ok("...but a repeat never raises the wait: Alpha, which offered 0 first, stays picked", picks("Victim3", tr2)[1] == "Alpha", tostring(picks("Victim3", tr2)[1]))
     run(700); local tb2 = W.time
     cur = v; v.ns.sync.ask()
     to(v, "O1," .. (tt + 300) .. ",500,400", "Newer"); to(v, "O1," .. (tt + 200) .. ",500,0", "Older"); run(6)
