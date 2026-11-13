@@ -138,6 +138,7 @@ function Y.broadcast(quiet)
     local msgs = { "H" .. VER .. "," .. sid .. "," .. L.full .. "," .. n .. "," .. #chunks }
     for i = 1, #chunks do msgs[i + 1] = "D" .. sid .. "," .. i .. "," .. chunks[i] end
     out = { msgs = msgs, i = 1, fails = 0, n = n, t = L.full, started = ns.now() }
+    Y.sent(L.full)
     again = false
     if not quiet then ns.say("sharing " .. n .. " prices with your guild, about " .. math.ceil(#msgs * GAP / 60) .. " min.") end
     pump(out)
@@ -341,6 +342,7 @@ end
 -- ignore A, O and P, so they are not picked until they update; their own Q asks are still answered above.
 local OFFERWAIT, COLLECT = 3, 5
 local round, heard, lastOffer, askedAt = nil, {}, nil, {}
+local sentT, sentAt = nil, -1e9                                  -- the last scan broadcast, and when it began
 local function ownCount(L)
     local n = 0
     for id, p in pairs(L.p) do if whole(id, 1e7) and id > 0 and whole(p, 1e12) and p > 0 then n = n + 1 end end
@@ -383,24 +385,42 @@ local function finishRound(r)
     end
     if best and on() and inGuild() then send("P" .. VER .. "," .. best .. "," .. bt) end
 end
+function Y.sent(t) sentT, sentAt = t, ns.now() end
 startRound = function(have)
     local r = { have = have, offers = {} }
     round = r
     C_Timer.After(COLLECT, function() finishRound(r) end)
 end
--- Picked: the same limits as a Q answer. Sending already: a picker who asked after the broadcast began missed its
--- start, so it is sent once more when 10 min have passed since the last answer; a picker from the same round has
--- it. Answered in the last 10 min: ignored; the hourly ask comes back.
+-- Picked: each scan goes out at most once per 10 min (its window starts with any broadcast of it). A pick inside the
+-- window is remembered (one per scan) and that scan is sent once more when the window ends, if it is still the
+-- current scan and under 12 h old; so a member cut by a /reload, or who logged in just after a broadcast, has it
+-- within about 10 min. A pick from a member who asked before that broadcast began is not remembered: it was in the
+-- same round and has the scan.
+local RESEND, queued, queueTimer = 600, nil, false
+local function resend()
+    queueTimer = false
+    local L, now = ns.live(), ns.now()
+    if not queued or queued ~= L.full or now - queued > 43200 or not on() or not inGuild() then queued = nil; return end
+    local wait = 30                                              -- still sending: look again shortly
+    if not out then
+        wait = (sentT == queued) and (sentAt + RESEND - now) or 0
+        if wait <= 0 then queued = nil; pending = nil; lastAnswer = now; Y.broadcast(true); return end
+    end
+    queueTimer = true
+    C_Timer.After(wait, resend)
+end
 local function picked(owner, t, who)
     if not mine(owner) then return end                           -- someone else was picked
-    local L = ns.live()
-    if t ~= L.full then return end                               -- not the scan this owner has now
-    if out then
-        if out.t == t and (askedAt[who] or -1e9) > out.started then again = true end
-        return
+    local L, now = ns.live(), ns.now()
+    if t ~= L.full or now - t > 43200 then return end            -- not the scan this owner has now, or too old
+    local open = out or (sentT == t and now - sentAt < RESEND)
+    if not open then pending = nil; lastAnswer = now; Y.broadcast(true); return end
+    if sentT == t and (askedAt[who] or -1e9) <= sentAt then return end   -- in that broadcast's round: has it
+    queued = t
+    if not queueTimer then
+        queueTimer = true
+        C_Timer.After(out and 30 or (sentAt + RESEND - now), resend)
     end
-    if ns.now() - lastAnswer < ASKGAP then return end
-    pending = nil; lastAnswer = ns.now(); Y.broadcast(true)
 end
 function Y.receive(prefix, text, channel, sender)
     if secret(prefix) or secret(text) or secret(channel) or secret(sender) then return end

@@ -232,9 +232,9 @@ W.log = {}
 local d = client("Saad")
 run(11); ok("no request before the delay", count("Q") + count("A") == 0)
 run(2); ok("request sent after login", count("A", "Saad") == 1)
-run(300)
+run(700)                                                            -- Tareq sent this scan minutes ago: once more at its 10-min mark
 ok("exactly one member answered", count("H") == 1, count("H"))
-ok("late player has the prices", G(d).full == L(c).full and G(d).p[1003] == 51)
+ok("late player has the prices (within about 10 min of the last broadcast)", G(d).full == L(c).full and G(d).p[1003] == 51)
 ok("only the member who scanned answers; received scans are not passed on", count("H", "Tareq") == 1)
 W.log = {}; local e = client("Nasser"); L(e).full = math.floor(W.time); run(60)
 ok("nobody answers a player who is already newer", count("A", "Nasser") == 1 and count("H") == 0)
@@ -497,8 +497,8 @@ do
     local m = client("Member")
     run(13)
     ok("PR-G: member asks at login (12 s)", since("A", "Member", t0) == 1)
-    run(300)
-    ok("PR-G: the owner answers the login ask once", since("H", "Owner", tlog) == 1 and G(m).full == L(own).full, since("H", "Owner", tlog))
+    run(700)                                                     -- the scan went out a minute before: re-sent at its 10-min mark
+    ok("PR-G: the owner answers the login ask once (at the scan's 10-min mark)", since("H", "Owner", tlog) == 1 and G(m).full == L(own).full, since("H", "Owner", tlog))
     local tq = W.time
     run(20 * 3600)
     local ts = times("A", "Member", tq)
@@ -592,8 +592,8 @@ do
     ok("PR-G: reload cut detected at login, one line", said("Buyer", "the last price transfer from Seller (" .. held .. " items) was cut by a reload; asking the guild again.", c1) == 1, chat[#chat])
     run(13); ok("PR-G: no extra ask at 12 s after a reload cut", since("A", "Buyer", tl) == 0, since("A", "Buyer", tl))
     run(30); ok("PR-G: one ask 30-40 s after login", since("A", "Buyer", tl) == 1, since("A", "Buyer", tl))
-    run(300)
-    ok("PR-G: the reload cut is filled in", G(m3).full == L(own2).full and since("A", "Buyer", tl) == 1, G(m3).full - L(own2).full)
+    run(700)
+    ok("PR-G: the reload cut is filled in (at the scan's 10-min mark)", G(m3).full == L(own2).full and since("A", "Buyer", tl) == 1, G(m3).full - L(own2).full)
     local c2 = #chat
     m3.guild = false
     local m4 = { name = "Buyer", frames = {}, prefix = {}, ns = {}, guild = true }
@@ -721,7 +721,19 @@ do
     fire(ow, "CHAT_MSG_ADDON", "AHProfit", "P1,Holder," .. L(ow).full, "GUILD", "Picker-Realm", "", 0, 0, "", 0); run(30)
     local tr2 = W.time
     fire(ow, "CHAT_MSG_ADDON", "AHProfit", "P1,Holder," .. L(ow).full, "GUILD", "Picker2-Realm", "", 0, 0, "", 0); run(300)
-    ok("PR-G pick: a repeat pick within 10 min is ignored", since("H", "Holder", tp) == 1 and since("H", "Holder", tr2) == 0, since("H", "Holder", tp))
+    ok("PR-G pick: a pick from a member who asked before the broadcast is not re-sent", since("H", "Holder", tp) == 1 and since("H", "Holder", tr2) == 0, since("H", "Holder", tp))
+    -- five members ask and pick inside the window: exactly one re-send, at its end
+    local t5 = W.time
+    for i = 1, 5 do
+        fire(ow, "CHAT_MSG_ADDON", "AHProfit", "A1,0", "GUILD", "Window" .. i .. "-Realm", "", 0, 0, "", 0)
+        fire(ow, "CHAT_MSG_ADDON", "AHProfit", "P1,Holder," .. L(ow).full, "GUILD", "Window" .. i .. "-Realm", "", 0, 0, "", 0)
+        run(40)
+    end
+    ok("PR-G pick: picks inside the window are not sent at once", since("H", "Holder", t5) == 0)
+    run(400)
+    ok("PR-G pick: five picks in the window, exactly one re-send at its end", since("H", "Holder", t5) == 1, since("H", "Holder", t5))
+    run(1200)
+    ok("PR-G pick: ...and no more after it", since("H", "Holder", t5) == 1, since("H", "Holder", t5))
     local hugeP = {}
     for i = 1, 3000 do hugeP[i] = R(90000 + i * 7, 700 + i, 1) end
     run(700); ow.guild = false; scan(ow, hugeP); ow.guild = true
@@ -750,10 +762,12 @@ do
     for _, f in ipairs({ "Core.lua", "Sync.lua" }) do assert(loadfile("AHProfit/" .. f))("AHProfit", v2.ns) end
     fire(v2, "ADDON_LOADED", "AHProfit"); fire(v2, "PLAYER_LOGIN")
     local tv = W.time
-    run(45)
-    cur = big2; ok("PR-G live: the re-ask and pick arrive while the owner is still sending", since("P", "Viewer", tv) == 1 and big2.ns.sync.status():find("Sending your scan now", 1, true) ~= nil)
-    run(400)
-    ok("PR-G live: the owner sends once more after finishing, and the reloaded member has the whole scan", since("H", "BigOwner", tv) == 1 and G(v2).full == L(big2).full, since("H", "BigOwner", tv))
+    run(45)                                                      -- the re-ask 30-40 s after the login
+    cur = big2; ok("PR-G live: the re-ask and pick arrive while the owner is still sending", since("P", "Viewer", tv) == 1 and big2.ns.sync.status():find("Sending your scan now", 1, true) ~= nil, since("P", "Viewer", tv))
+    run(470)
+    ok("PR-G live: nothing more before the scan's 10-min mark", since("H", "BigOwner", tv) == 0, since("H", "BigOwner", tv))
+    run(200)                                                     -- re-sent at about 582 s; 3,000 items take about 95 s
+    ok("PR-G live: re-sent once at the 10-min mark, and the reloaded member has the whole scan", since("H", "BigOwner", tv) == 1 and G(v2).full == L(big2).full, since("H", "BigOwner", tv))
     big2.guild, v2.guild = false, false
     -- no offer when the scan is not newer than the asker's, or more than 12 h old
     ow.guild = true
@@ -766,6 +780,41 @@ do
     run(12 * 3600 + 60); local t12 = W.time
     fire(ow, "CHAT_MSG_ADDON", "AHProfit", "A1,0", "GUILD", "Late-Realm", "", 0, 0, "", 0); run(30)
     ok("PR-G offer: none when the scan is more than 12 h old", since("O", "Holder", t12) == 0)
+    -- a remembered pick is dropped when the owner has a newer scan by the window's end, or the scan turned 12 h old
+    local function hFor(from, t0, scanT)
+        local n = 0
+        for _, m in ipairs(W.log) do
+            if m.from == from and m.at >= t0 and m.msg:match("^H%d+,%d+,(%d+),") == tostring(scanT) then n = n + 1 end
+        end
+        return n
+    end
+    for _, cl in ipairs(clients) do cl.guild = false end          -- only Keeper and injected members below
+    local kp = offline("Keeper"); scan(kp, prices(9600)); kp.guild = true; run(30)
+    local tw = W.time
+    cur = kp; local tOld = L(kp).full
+    fire(kp, "CHAT_MSG_ADDON", "AHProfit", "A1,0", "GUILD", "First-Realm", "", 0, 0, "", 0)
+    fire(kp, "CHAT_MSG_ADDON", "AHProfit", "P1,Keeper," .. L(kp).full, "GUILD", "First-Realm", "", 0, 0, "", 0); run(150)
+    local sentOld = since("H", "Keeper", tw)
+    fire(kp, "CHAT_MSG_ADDON", "AHProfit", "A1,0", "GUILD", "Queued-Realm", "", 0, 0, "", 0)
+    fire(kp, "CHAT_MSG_ADDON", "AHProfit", "P1,Keeper," .. L(kp).full, "GUILD", "Queued-Realm", "", 0, 0, "", 0)
+    run(120); cur = kp; L(kp).full = math.floor(W.time)            -- a newer complete scan inside the window, not shared
+    local tNew2 = L(kp).full
+    run(600)                                                       -- past the old scan's window end
+    ok("PR-G pick: a remembered pick for a scan that is no longer current is dropped, and nothing else is sent", sentOld == 1 and hFor("Keeper", tw, tOld) == 1 and since("H", "Keeper", tw) == 1,
+        hFor("Keeper", tw, tOld) .. " " .. hFor("Keeper", tw, tNew2))
+    kp.guild = false
+    local aged = offline("Aged")
+    scan(aged, prices(9800)); aged.guild = true
+    run(12 * 3600 - 300)                                                  -- the scan is 11 h 55 min old
+    local tg = W.time
+    fire(aged, "CHAT_MSG_ADDON", "AHProfit", "A1,0", "GUILD", "One-Realm", "", 0, 0, "", 0)
+    fire(aged, "CHAT_MSG_ADDON", "AHProfit", "P1,Aged," .. L(aged).full, "GUILD", "One-Realm", "", 0, 0, "", 0); run(30)
+    fire(aged, "CHAT_MSG_ADDON", "AHProfit", "A1,0", "GUILD", "Two-Realm", "", 0, 0, "", 0)
+    fire(aged, "CHAT_MSG_ADDON", "AHProfit", "P1,Aged," .. L(aged).full, "GUILD", "Two-Realm", "", 0, 0, "", 0)
+    run(900)
+    ok("PR-G pick: a remembered pick is dropped once the scan is over 12 h old", since("H", "Aged", tg) == 1, since("H", "Aged", tg))
+    aged.guild = false
+    ow.guild = true
     -- unknown kinds are ignored without an error and without a reply
     local tu = W.time
     local okU = pcall(function()
