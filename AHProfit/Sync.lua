@@ -6,7 +6,9 @@
 -- Messages (each at most 255 bytes, plain text):
 --   H<ver>,<session>,<scan time>,<items>,<chunks>     start of a scan
 --   D<session>,<chunk number>,<payload>               items: id step, price, quantity as base-32 digits
---   Q<ver>,<newest prices I have>                     sent at login; one member with newer prices answers
+--   Q<ver>,<newest prices I have>                     sent at login, about once an hour and 30 s after a cut
+--                                                     transfer; one member with newer prices answers (at most
+--                                                     once per 10 min)
 --   G<ver>,<map>,<node>,<x>,<y>,<time>                one gathering node a member just picked (x, y in 1/1000 of the map)
 --   R<ver>,<nodes I know>                             sent at login; one member who knows more sends the newest ones
 local _, ns = ...
@@ -90,6 +92,9 @@ end
 
 -- ----------------------------------------------------------------------------------------------------- sending --
 local out, again, pending = nil, false, nil
+local ASKGAP, HOUR, JITTER, CUTWAIT = 600, 3600, 300, 30      -- asks: at most one per 10 min, hourly +-5 min, 30 s after a cut
+local lastAsk, lastAnswer, nextCheck, reask, cut = -1e9, -1e9, nil, false, nil
+local busy                                                   -- defined with the receiving side: a transfer is coming in
 local function inGuild() return IsInGuild ~= nil and IsInGuild() and true or false end
 -- true = sent; false = try again later.
 local function send(msg)
@@ -107,7 +112,7 @@ local function pump(job)
         if job.i > #job.msgs then
             out = nil
             ns.say("scan shared with your guild (" .. job.n .. " items).")
-            if again then again = false; Y.broadcast(true) end
+            if again then Y.answerLater() end
             return
         end
         C_Timer.After(GAP, function() pump(job) end)
@@ -138,7 +143,36 @@ end
 function Y.ask()
     if not on() or not inGuild() then return end
     local L, H = ns.live(), ns.shared()
-    send("Q" .. VER .. "," .. math.floor(math.max(L.full, H.full, ns.seed and ns.seed.t or 0)))
+    if send("Q" .. VER .. "," .. math.floor(math.max(L.full, H.full, ns.seed and ns.seed.t or 0))) then lastAsk = ns.now() end
+end
+-- Answering: one broadcast per 10 min at most. A member who asked while a broadcast was running missed its start,
+-- so it is sent again once the 10 min are up.
+function Y.answerLater()
+    local wait = lastAnswer + ASKGAP - ns.now()
+    local function go()
+        if not again or out then return end
+        again = false; lastAnswer = ns.now(); Y.broadcast(true)
+    end
+    if wait <= 0 then go() else C_Timer.After(wait, go) end
+end
+-- Asking again: about once an hour, so a member who stays online after a cut transfer, or who logged in while the
+-- scan's owner was offline, still gets the newest prices. Nothing is sent while a transfer runs either way or
+-- within 10 min of the last ask; when everyone has the newest scan, nobody answers.
+local function hourly()
+    if on() and inGuild() and not out and not busy() and ns.now() - lastAsk >= ASKGAP then Y.ask() end
+    local wait = HOUR - JITTER + math.random() * 2 * JITTER
+    nextCheck = ns.now() + wait
+    C_Timer.After(wait, hourly)
+end
+-- After a cut transfer: ask once, 30 s later (up to 10 s jitter), but never within 10 min of the last ask.
+local function askAgain()
+    if reask then return end
+    reask = true
+    local wait = math.max(CUTWAIT + math.random() * 10, lastAsk + ASKGAP - ns.now())
+    C_Timer.After(wait, function()
+        reask = false
+        if on() and inGuild() and not busy() then Y.ask() end
+    end)
 end
 
 -- Gathering nodes go out one at a time, behind any price broadcast.
@@ -196,8 +230,18 @@ end
 -- --------------------------------------------------------------------------------------------------- receiving --
 local R = {}
 local PENDING = 900                                              -- an unfinished transfer is forgotten after this
+busy = function() return next(R) ~= nil end
 local function expire(now)
-    for k, r in pairs(R) do if now - r.at > PENDING then R[k] = nil end end
+    for k, r in pairs(R) do
+        if now - r.at > PENDING then
+            R[k] = nil
+            if r.count < r.chunks and on() and inGuild() then  -- cut off: the rest never came
+                cut = { from = k:match("^[^-]+"), got = r.items, n = r.n }
+                ns.say(cut.from .. "'s prices were cut off (" .. cut.got .. " of " .. cut.n .. "); asking the guild again.")
+                askAgain()
+            end
+        end
+    end
 end
 local function mine(sender)
     local n, r = UnitName("player")
@@ -215,6 +259,9 @@ local function header(sender, ver, sid, t, n, chunks)
     expire(now)
     if t <= math.max(L.full, H.full) then return end            -- nothing newer than what is here
     held[H] = ns.pruneShared(H)                                  -- also drops entries older than 12 h
+    if not R[sender] or R[sender].t ~= t then
+        ns.say("receiving prices from " .. sender:match("^[^-]+") .. "'s scan (about " .. n .. " items)...")
+    end
     R[sender] = { sid = sid, t = t, n = n, chunks = chunks, got = {}, count = 0, items = 0, seen = {}, at = now, stage = {}, stored = 0 }
     C_Timer.After(PENDING + 5, function() expire(ns.now()) end)  -- also when nobody sends anything more
 end
@@ -262,7 +309,7 @@ local function chunk(sender, sid, seq, payload)
             r.stored = r.stored + 1
         end
     end
-    if complete and t > H.full then H.full = t end
+    if complete and t > H.full then H.full = t; cut = nil end
     local used = {}
     for _, it in pairs(H.t) do used[it] = true end
     for k in pairs(H.from) do if not used[k] then H.from[k] = nil end end
@@ -275,12 +322,15 @@ local function request(have)
     if out then if out.t > have then again = true end return end
     local L = ns.live()
     if L.full <= have or ns.now() - L.full > 43200 then return end
+    if ns.now() - lastAnswer < ASKGAP then return end           -- answered in the last 10 min: the hourly ask comes back
     local tok = {}
     pending = tok
     -- Only your own scan is sent. When a guild member's newer scan is known here, its owner gets the first chance
     -- to answer (seeing their reply cancels this one).
     local wait = ns.shared().full > L.full and 12 or 2
-    C_Timer.After(wait + math.random() * 8, function() if pending == tok and not out then Y.broadcast(true) end end)
+    C_Timer.After(wait + math.random() * 8, function()
+        if pending == tok and not out then lastAnswer = ns.now(); Y.broadcast(true) end
+    end)
 end
 function Y.receive(prefix, text, channel, sender)
     if secret(prefix) or secret(text) or secret(channel) or secret(sender) then return end
@@ -313,6 +363,10 @@ function Y.status()
     local s = "Guild sharing is on."
     if out then s = s .. " Sending your scan now (" .. (out.i - 1) .. " of " .. #out.msgs .. " messages)." end
     if DB.syncFrom and DB.syncAt then s = s .. " Last received: " .. DB.syncFrom .. "'s scan, " .. ns.age(DB.syncAt) .. "." end
+    if cut then
+        s = s .. " Last transfer from " .. cut.from .. " was cut (" .. cut.got .. (cut.n and (" of " .. cut.n) or " items arrived") .. ")."
+    end
+    if nextCheck then s = s .. " Next check for newer guild prices in ~" .. math.max(1, math.ceil((nextCheck - ns.now()) / 60)) .. "m." end
     return s
 end
 
@@ -325,6 +379,24 @@ f:SetScript("OnEvent", function(_, ev, ...)
     if not (CI and CI.RegisterAddonMessagePrefix and CI.SendAddonMessage) then return end
     pcall(CI.RegisterAddonMessagePrefix, PFX)
     f:RegisterEvent("CHAT_MSG_ADDON")
-    C_Timer.After(12, Y.ask)
+    -- A transfer cut by a reload or logout leaves shared prices newer than the last complete scan in the save.
+    local H, newest, got = ns.sharedOK() and ns.shared(), 0, 0
+    if H then
+        for _, t in pairs(H.t) do
+            if t > H.full then
+                if t > newest then newest, got = t, 1 elseif t == newest then got = got + 1 end
+            end
+        end
+    end
+    if newest > 0 and on() and inGuild() then
+        cut = { from = H.from[newest] or "a guild member", got = got }
+        ns.say("the last price transfer from " .. cut.from .. " (" .. got .. " items) was cut by a reload; asking the guild again.")
+        askAgain()                                               -- this is the login ask, 30 s in instead of 12
+    else
+        C_Timer.After(12, Y.ask)
+    end
+    local first = HOUR - JITTER + math.random() * 2 * JITTER
+    nextCheck = ns.now() + first
+    C_Timer.After(first, hourly)
     C_Timer.After(25, Y.askNodes)
 end)
