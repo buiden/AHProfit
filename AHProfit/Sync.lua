@@ -396,10 +396,11 @@ end
 -- scan is heard after all, or 12 h. Chunks count as alive: an owner still sending sends the scan again later.
 local WATCH = 30
 local skipped, watch = {}, nil
+local SKIPMAX = 3600                                             -- a skip lasts until the next regular ask, 1 h at most
 local function isSkipped(name, t)
     local sk = skipped[name]
     if not sk then return false end
-    if sk.t ~= t or ns.now() - sk.at > 43200 then skipped[name] = nil; return false end
+    if sk.t ~= t or ns.now() - sk.at > SKIPMAX then skipped[name] = nil; return false end
     return true
 end
 local function finishRound(r)
@@ -407,7 +408,11 @@ local function finishRound(r)
     round = nil
     local best, bt
     for name, t in pairs(r.offers) do
-        if not isSkipped(name, t) and (not bt or t > bt or (t == bt and name < best)) then best, bt = name, t end
+        -- newest scan; at equal times one ready to send now (wait 0), then the lowest name. Never an older scan for that.
+        local ready, bready = (r.waits[name] or 0) == 0, best and (r.waits[best] or 0) == 0
+        if not isSkipped(name, t) and (not bt or t > bt or (t == bt and ((ready and not bready) or (ready == bready and name < best)))) then
+            best, bt = name, t
+        end
     end
     if not best then
         -- No offer at all: maybe only 0.6.0 members have newer prices. Ask once the old way (they answer Q), at
@@ -425,6 +430,7 @@ local function finishRound(r)
         if watch ~= w then return end
         watch = nil
         if w.alive then return end
+        if not (on() and inGuild()) then return end              -- sync off or out of the guild: no skip, no retry
         skipped[w.owner] = { t = w.t, at = ns.now() }
         if not w.retry and on() and inGuild() then Y.ask(true) end     -- one more round, leaving that owner out
     end)
@@ -436,6 +442,9 @@ local function heardFrom(who, t)
 end
 function Y.sent(t) sentT, sentAt, sentSeq = t, ns.now(), seq end
 startRound = function(have, retry)
+    -- A regular ask (login, hourly, after a cut) tries skipped owners again; expired skips go either way.
+    local now = ns.now()
+    for name, sk in pairs(skipped) do if not retry or now - sk.at > SKIPMAX then skipped[name] = nil end end
     local r = { have = have, offers = {}, waits = {}, retry = retry, n = 0 }
     -- Offers heard in the last 5 s count too: their owners do not offer again so soon, and askers a second or two
     -- apart must pick the same owner.
@@ -514,10 +523,15 @@ function Y.receive(prefix, text, channel, sender)
     local k = text:sub(1, 1)
     if k == "D" then
         local sid, seq, payload = text:match("^D(%d%d%d%d%d%d),(%d%d?%d?%d?),([%w+/]+)$")
-        if sid then heardFrom(who); chunk(sender, tonumber(sid), tonumber(seq), payload) end
+        if sid then
+            local r = R[sender]
+            if r and r.sid == tonumber(sid) then heardFrom(who) end -- alive only within a transfer heard from it
+            chunk(sender, tonumber(sid), tonumber(seq), payload)
+        end
     elseif k == "H" then
         local ver, sid, t, n, chunks = text:match("^H(%d%d?),(%d%d%d%d%d%d),(%d%d?%d?%d?%d?%d?%d?%d?%d?%d?%d?),(%d%d?%d?%d?%d?),(%d%d?%d?%d?)$")
-        if ver then heardFrom(who, tonumber(t)); header(sender, tonumber(ver), tonumber(sid), tonumber(t), tonumber(n), tonumber(chunks)) end
+        if ver and tonumber(ver) == VER then heardFrom(who, tonumber(t)) end
+        if ver then header(sender, tonumber(ver), tonumber(sid), tonumber(t), tonumber(n), tonumber(chunks)) end
     elseif k == "Q" then
         local ver, have = text:match("^Q(%d%d?),(%d%d?%d?%d?%d?%d?%d?%d?%d?%d?%d?)$")
         if ver and tonumber(ver) == VER then request(tonumber(have), who) end

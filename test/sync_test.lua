@@ -1139,5 +1139,109 @@ do
     ok("R2-6: ...and nothing more", #hs("Owner3", t7) == 3, str(hs("Owner3", t7)))
     alone()
 end
+
+-- ---- PR-G review round 3 (مانع, S1): skips expire at the next regular ask; stray chunks; ready owners first
+do
+    local function alone() for _, cl in ipairs(clients) do cl.guild = false end end
+    local function to(c, msg, from) fire(c, "CHAT_MSG_ADDON", "AHProfit", msg, "GUILD", from .. "-Realm", "", 0, 0, "", 0) end
+    local function items(base, n) local r = {} for i = 1, n do r[i] = R(base + i * 3, 300 + i, 1) end return r end
+    local function since(kind, from, t0) local n = 0; for _, m in ipairs(W.log) do if m.msg:sub(1, 1) == kind and m.from == from and m.at >= t0 then n = n + 1 end end return n end
+    local function picks(from, t0) local o = {} for _, m in ipairs(W.log) do if m.from == from and m.at >= t0 and m.msg:sub(1, 1) == "P" then o[#o + 1] = m.msg:match("^P1,([^,]+),") end end return o end
+    local function reload(old)
+        old.guild = false
+        local c = { name = old.name, frames = {}, prefix = {}, ns = {}, guild = true }
+        clients[#clients + 1] = c
+        cur = c; AHProfitDB = old.db
+        for _, f in ipairs({ "Core.lua", "Sync.lua" }) do assert(loadfile("AHProfit/" .. f))("AHProfit", c.ns) end
+        fire(c, "ADDON_LOADED", "AHProfit"); c.db = AHProfitDB; c.slash = SlashCmdList.AHPROFIT
+        fire(c, "PLAYER_LOGIN")
+        return c
+    end
+    local function skippedOf(c)                                   -- the asker's skip table, through upvalues
+        local seen = {}
+        local function find(f, depth)
+            if depth > 4 or seen[f] then return end
+            seen[f] = true
+            for i = 1, 200 do
+                local k, v = debug.getupvalue(f, i)
+                if k == nil then break end
+                if k == "skipped" then return v end
+                if type(v) == "function" then local r = find(v, depth + 1); if r then return r end end
+            end
+        end
+        return find(c.ns.sync.ask, 0) or {}
+    end
+    local function count(t) local n = 0; for _ in pairs(t) do n = n + 1 end return n end
+
+    -- case 1: an owner inside its window remembers the pick, then reloads; the asker gets it within about 1 h
+    alone(); run(700)
+    local own = client("Reloader"); run(30)
+    scan(own, items(500000, 400)); run(60)
+    local tl = W.time
+    local asker = client("Waiter"); run(30)                        -- picks Reloader, which is inside its window
+    ok("S1 case 1: the pick is remembered by the owner (inside its window)", #picks("Waiter", tl) == 1 and picks("Waiter", tl)[1] == "Reloader")
+    run(30); own = reload(own)                                     -- the remembered pick is lost
+    run(3900 + 120)
+    ok("S1 case 1: the asker has the scan within about 1 h and a round", G(asker).full == L(own).full, G(asker).full - L(own).full)
+    alone(); run(700)
+
+    -- case 2: an owner drops for 5 min after offering and returns with the same scan
+    local own2 = client("Dropper"); run(30)
+    own2.guild = false; scan(own2, items(510000, 400)); run(30); own2.guild = true
+    run(700)
+    local t2 = W.time
+    local asker2 = client("Waiter2")
+    run(12 + 4); own2.guild = false                               -- after its offer, before the pick
+    run(300); own2.guild = true
+    run(3900 + 120)
+    ok("S1 case 2: the asker has the scan within about 1 h and a round", G(asker2).full == L(own2).full and #picks("Waiter2", t2) >= 2, G(asker2).full - L(own2).full)
+    ok("S1: skips are gone after the regular ask", count(skippedOf(asker2)) == 0, count(skippedOf(asker2)))
+    alone(); run(700)
+
+    -- a fake that keeps the same scan time is still skipped within one round
+    local v = client("Victim3"); run(30)
+    local tf = W.time
+    cur = v; v.ns.sync.ask()
+    local fakeT = math.floor(W.time)
+    to(v, "O1," .. fakeT .. ",500,0", "Faker3"); run(36)
+    to(v, "O1," .. fakeT .. ",500,0", "Faker3"); run(10)
+    ok("S1: a fake with the same scan time is left out of the next round", since("A", "Victim3", tf) == 2 and #picks("Victim3", tf) == 1, since("A", "Victim3", tf) .. " " .. #picks("Victim3", tf))
+    -- a skip expires after 1 h even without a regular ask
+    local sk = skippedOf(v)
+    ok("S1: the skip is recorded", sk.Faker3 ~= nil)
+    v.guild = false; run(3700); v.guild = true                    -- (no regular ask meanwhile: only the 1 h limit)
+    cur = v; v.ns.sync.ask(true)                                  -- a retry round: expired skips are purged
+    ok("S1: an expired skip is purged", sk.Faker3 == nil)
+    -- no skip while sync is off
+    run(700); local ts = W.time
+    cur = v; v.ns.sync.ask()
+    to(v, "O1," .. math.floor(W.time) .. ",500,0", "Faker4"); run(6)
+    cur = v; v.slash("sync off"); run(40); cur = v; v.slash("sync on")
+    ok("S1: no skip and no retry recorded while sync is off", skippedOf(v).Faker4 == nil and since("A", "Victim3", ts) == 1)
+    -- (a) a stray chunk from the picked owner, without its header, does not count as alive
+    run(700); local td = W.time
+    cur = v; v.ns.sync.ask()
+    to(v, "O1," .. math.floor(W.time) .. ",500,0", "Stray"); run(10)
+    to(v, "D123456,1,AAAA", "Stray"); run(30)
+    ok("(a) a stray chunk without a header does not keep the pick alive", since("A", "Victim3", td) == 2 and skippedOf(v).Stray ~= nil, since("A", "Victim3", td))
+    -- a header of another version does not keep the pick alive either
+    run(700); local tv = W.time
+    cur = v; v.ns.sync.ask()
+    local tv0 = math.floor(W.time)
+    to(v, "O1," .. tv0 .. ",500,0", "OtherVer"); run(10)
+    to(v, "H2,654321," .. tv0 .. ",500,5", "OtherVer"); run(30)
+    ok("a header of another version does not keep the pick alive", since("A", "Victim3", tv) == 2 and skippedOf(v).OtherVer ~= nil, since("A", "Victim3", tv))
+    -- (b) at equal times the owner ready to send (wait 0) is picked; never an older scan for that
+    run(700); local tb = W.time
+    cur = v; v.ns.sync.ask()
+    local tt = math.floor(W.time) - 10
+    to(v, "O1," .. tt .. ",500,400", "Aaron"); to(v, "O1," .. tt .. ",500,0", "Zed"); run(6)
+    ok("(b) equal scan times: the owner with wait 0 is picked over a lower name", picks("Victim3", tb)[1] == "Zed", tostring(picks("Victim3", tb)[1]))
+    run(700); local tb2 = W.time
+    cur = v; v.ns.sync.ask()
+    to(v, "O1," .. (tt + 300) .. ",500,400", "Newer"); to(v, "O1," .. (tt + 200) .. ",500,0", "Older"); run(6)
+    ok("(b) a newer scan with a wait still beats an older one ready now", picks("Victim3", tb2)[1] == "Newer", tostring(picks("Victim3", tb2)[1]))
+    alone()
+end
 print(pass .. " passed, " .. fail .. " failed")
 os.exit(fail == 0 and 0 or 1)
