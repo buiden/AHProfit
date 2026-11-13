@@ -307,7 +307,12 @@ do
     ok("unknown node, off-map, future, stale, other version, other channel and malformed are all refused", as(b).nodeCount() == 2, as(b).nodeCount())
     -- a member who logs in later asks once and gets the nodes
     local g0 = count("G")
+    -- Which member answers first is a random 3-12 s draw; pin it so the check below does not depend on how many
+    -- random numbers earlier code used (Ahmed, who knows both nodes, answers first).
+    local rnd = math.random
+    math.random = function(m, n) if m then return rnd(m, n) end return cur and cur.name == "Ahmed" and 0 or 0.9 end
     local c = client("Tareq"); run(60)
+    math.random = rnd
     ok("late member asks for nodes", count("R", "Tareq") == 1)
     ok("and receives them from one member only", as(c).nodeCount() == 2 and count("G") - g0 == 2, as(c).nodeCount() .. " " .. (count("G") - g0))
     local d = client("Solo", false); d.map, d.pos = 1429, { x = 0.5, y = 0.5 }

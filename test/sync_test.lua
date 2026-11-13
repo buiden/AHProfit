@@ -43,7 +43,7 @@ C_ChatInfo = {
         b.n = math.min(10, b.n + (W.time - b.at)); b.at = W.time; W.tokens[cur] = b
         if b.n < 1 then W.throttled = (W.throttled or 0) + 1; return 3 end
         b.n = b.n - 1
-        W.log[#W.log + 1] = { from = cur.name, msg = msg }
+        W.log[#W.log + 1] = { from = cur.name, msg = msg, at = W.time }
         if W.drop and W.drop(msg) then return 0 end
         local sender = cur.name .. "-Realm"
         for _, c in ipairs(clients) do
@@ -230,27 +230,28 @@ ok("retries through refusals", G(a).full == L(c).full and G(a).p[2200] == nil an
 -- ---- someone logs in later: asks, exactly one member answers
 W.log = {}
 local d = client("Saad")
-run(11); ok("no request before the delay", count("Q") == 0)
-run(2); ok("request sent after login", count("Q", "Saad") == 1)
-run(300)
+run(11); ok("no request before the delay", count("Q") + count("A") == 0)
+run(2); ok("request sent after login", count("A", "Saad") == 1)
+run(700)                                                            -- Tareq sent this scan minutes ago: once more at its 10-min mark
 ok("exactly one member answered", count("H") == 1, count("H"))
-ok("late player has the prices", G(d).full == L(c).full and G(d).p[1003] == 51)
+ok("late player has the prices (within about 10 min of the last broadcast)", G(d).full == L(c).full and G(d).p[1003] == 51)
 ok("only the member who scanned answers; received scans are not passed on", count("H", "Tareq") == 1)
 W.log = {}; local e = client("Nasser"); L(e).full = math.floor(W.time); run(60)
-ok("nobody answers a player who is already newer", count("Q", "Nasser") == 1 and count("H") == 0)
+ok("nobody answers a player who is already newer", count("A", "Nasser") == 1 and count("H") == 0)
 L(e).full = 0
 
 -- ---- switches
 W.log = {}; cur = a; a.slash("sync off")
 W.time = W.time + 1000; scan(a, res); run(200)
-ok("sync off: nothing sent", #W.log == 0 and a.db.sync == false)
+local function fromN(name) local n = 0; for _, m in ipairs(W.log) do if m.from == name then n = n + 1 end end return n end   -- every kind
+ok("sync off: nothing sent", fromN("Abdullah") == 0 and a.db.sync == false, fromN("Abdullah"))   -- others' asks may appear
 a.slash("sync on"); cur = a; a.slash("share"); run(200)
 ok("/ahp share sends the last scan", count("H", "Abdullah") == 1 and G(b).full == L(a).full and G(b).p[1003] == 137)
 W.log = {}; cur = b; b.slash("sync off"); W.time = W.time + 1000; scan(a, res2); run(200)
 ok("sync off: nothing received", G(b).p[1003] == 137)
 b.slash("sync on")
 W.log = {}; a.guild = false; W.time = W.time + 1000; scan(a, res); run(200); cur = a; a.slash("share")
-ok("not in a guild: nothing sent, clear message", #W.log == 0 and chat[#chat]:find("not in a guild", 1, true), chat[#chat]); a.guild = true
+ok("not in a guild: nothing sent, clear message", fromN("Abdullah") == 0 and chat[#chat]:find("not in a guild", 1, true), chat[#chat]); a.guild = true
 local sv = C_ChatInfo; C_ChatInfo = nil; local o1 = pcall(function() cur = a; return a.ns.sync.broadcast(true) end); C_ChatInfo = sv
 ok("client without addon messages: no error", o1)
 
@@ -384,7 +385,9 @@ do
     local said = #chat
     to("H1,123458," .. math.floor(W.time) .. ",2,1", "Honest-Realm")
     to("D123458,1," .. Y.encode({ p = { [5] = 10, [6] = 11 }, q = {} })[1], "Honest-Realm")
-    ok("nothing stored: no 'prices updated' message and the sender is not recorded", c.db.syncFrom == before and #chat == said and H.p[5] == nil, tostring(c.db.syncFrom) .. " " .. (#chat - said))
+    local updated = 0
+    for i = said + 1, #chat do if chat[i]:find("prices updated", 1, true) then updated = updated + 1 end end
+    ok("nothing stored: no 'prices updated' message and the sender is not recorded", c.db.syncFrom == before and updated == 0 and H.p[5] == nil, tostring(c.db.syncFrom) .. " " .. updated)
     W.guild = true
 end
 
@@ -456,6 +459,802 @@ do
     c7.ns.sync.receive("AHProfit", "D424242,1,3E1", "GUILD", "Guildmate-Realm")
     cur = c7
     ok("N6: a newer save: received prices are not shown and its data is untouched", c7.ns.lookup(3) == nil and db7.shared.x == 1 and db7.v == 9)
+end
+-- ---- PR-G: ask again (hourly, after a cut by expiry or by reload), answer at most once per 10 min
+do
+    for _, cl in ipairs(clients) do cl.guild = false end           -- earlier members leave: only the ones below talk
+    W.guild, W.drop, W.fail, W.lockdown = true, nil, 0, false
+    local function up(f, name)
+        for i = 1, 200 do
+            local k, v = debug.getupvalue(f, i)
+            if k == nil then break end
+            if k == name then return v end
+        end
+        error("upvalue " .. name)
+    end
+    local function since(kind, from, t0)
+        local n = 0
+        for _, m in ipairs(W.log) do if m.msg:sub(1, 1) == kind and m.from == from and m.at >= t0 then n = n + 1 end end
+        return n
+    end
+    local function times(kind, from, t0)
+        local o = {}
+        for _, m in ipairs(W.log) do if m.msg:sub(1, 1) == kind and m.from == from and m.at >= t0 then o[#o + 1] = m.at end end
+        return o
+    end
+    local function said(who, pat, c0)
+        local n = 0
+        for i = c0 + 1, #chat do if chat[i]:find(who .. ": ", 1, true) == 1 and chat[i]:find(pat, 1, true) then n = n + 1 end end
+        return n
+    end
+    local big = {}
+    for i = 1, 400 do big[i] = R(30000 + i * 3, 200 + i, 1) end
+
+    -- hourly ask: once per period, 55-65 min apart, one tiny message; nobody answers when nothing is newer
+    W.log = {}
+    local t0 = W.time
+    local own = client("Owner"); scan(own, big); run(60)             -- Owner's scan, shared at once
+    local tlog = W.time
+    local m = client("Member")
+    run(13)
+    ok("PR-G: member asks at login (12 s)", since("A", "Member", t0) == 1)
+    run(700)                                                     -- the scan went out a minute before: re-sent at its 10-min mark
+    ok("PR-G: the owner answers the login ask once (at the scan's 10-min mark)", since("H", "Owner", tlog) == 1 and G(m).full == L(own).full, since("H", "Owner", tlog))
+    local tq = W.time
+    run(20 * 3600)
+    local ts = times("A", "Member", tq)
+    local okGap, lo, hi = true, 1e9, 0
+    for i = 2, #ts do local g = ts[i] - ts[i - 1]; lo, hi = math.min(lo, g), math.max(hi, g); if g < 3300 or g > 3900 then okGap = false end end
+    ok("PR-G: hourly ask, about 20 in 20 h", #ts >= 18 and #ts <= 22, #ts)
+    ok("PR-G: hourly asks 55-65 min apart, with jitter", okGap and hi > lo, lo .. ".." .. hi)
+    ok("PR-G: nobody answers an hourly ask when nothing is newer", since("H", "Owner", tq) == 0, since("H", "Owner", tq))
+    cur = m; local st = m.ns.sync.status()
+    ok("PR-G: status gives the next check", st:find("Next check for newer guild prices in ~%d+m%.") ~= nil, st)
+
+    -- skipped while receiving, while sending, within 10 min of an ask, with sync off, outside a guild
+    local Ym = m.ns.sync
+    local function upOr(f, name) local okU, v = pcall(up, f, name); return okU and v or nil end   -- nil on versions without it
+    local function toNext() cur = m; local n = upOr(Ym.status, "nextCheck"); return n and (n - W.time) or 3600 end
+    -- receiving: a transfer from someone else is under way at the check
+    run(toNext() - 5); local tr = W.time
+    fire(m, "CHAT_MSG_ADDON", "AHProfit", "H1,616161," .. math.floor(W.time) .. ",5,3", "GUILD", "Busy-Realm", "", 0, 0, "", 0)
+    fire(m, "CHAT_MSG_ADDON", "AHProfit", "D616161,1,3E1", "GUILD", "Busy-Realm", "", 0, 0, "", 0)
+    run(10)
+    ok("PR-G: no hourly ask while a transfer is coming in", since("A", "Member", tr) == 0, since("A", "Member", tr))
+    run(1000)                                                    -- the Busy transfer expires (cut): one re-ask
+    -- sending: Member's own broadcast is running at the check
+    local mine = {}
+    for i = 1, 3000 do mine[i] = R(40000 + i * 7, 300 + i, 2) end
+    run(toNext() - 20)
+    scan(m, mine); local tsend = W.time
+    cur = m; ok("PR-G: member is sending", upOr(Ym.status, "out") ~= nil)
+    run(40)
+    ok("PR-G: no hourly ask while sending", since("A", "Member", tsend) == 0, since("A", "Member", tsend))
+    run(300)
+    -- within 10 min of the last ask
+    run(toNext() - 300); cur = m; Ym.ask(); local tm = W.time
+    run(310)
+    ok("PR-G: no hourly ask within 10 min of the last one", since("A", "Member", tm) == 1, since("A", "Member", tm))
+    -- sync off, then not in a guild: nothing, but the timer keeps going
+    cur = m; m.slash("sync off"); local toff = W.time
+    run(toNext() + 5)
+    ok("PR-G: no hourly ask with sync off", since("A", "Member", toff) == 0)
+    cur = m; m.slash("sync on"); m.guild = false; local tng = W.time
+    run(toNext() + 5)
+    ok("PR-G: no hourly ask outside a guild", since("A", "Member", tng) == 0)
+    m.guild = true; local tback = W.time
+    run(toNext() + 5)
+    ok("PR-G: hourly ask resumes afterwards", since("A", "Member", tback) == 1, since("A", "Member", tback))
+
+    -- cut by expiry: one line, one re-ask 30-40 s later, the next complete transfer succeeds
+    local own2 = client("Seller"); local m2 = client("Buyer")
+    run(400)
+    for _, cl in ipairs({ own, m }) do cl.guild = false end
+    local res3 = {}
+    for i = 1, 400 do res3[i] = R(50000 + i * 3, 900 + i, 1) end
+    local c0 = #chat
+    W.drop = function(msg) local s = msg:match("^D%d+,(%d+),"); return s and tonumber(s) >= 3 end
+    scan(own2, res3); run(60); W.drop = nil
+    ok("PR-G: receiving line once when the header is accepted", said("Buyer", "receiving prices from Seller's scan (about 400 items)...", c0) == 1, said("Buyer", "receiving", c0))
+    local got = 0; for _, t in pairs(G(m2).t) do if t == L(own2).full then got = got + 1 end end
+    ok("PR-G: part of the scan arrived, not complete", got > 0 and got < 400 and G(m2).full < L(own2).full, got)
+    local tcut = W.time
+    run(900 - 60 + 4)
+    ok("PR-G: no re-ask before the transfer expires", since("A", "Buyer", tcut) == 0)
+    run(8)                                                       -- the expiry timer (last chunk + 905 s)
+    ok("PR-G: cut line once, with counts", said("Buyer", "Seller's prices were cut off (" .. got .. " of 400); asking the guild again.", c0) == 1, chat[#chat])
+    cur = m2; local st2 = m2.ns.sync.status()
+    ok("PR-G: status names the cut transfer", st2:find("Last transfer from Seller was cut (" .. got .. " of 400).", 1, true) ~= nil, st2)
+    local texp = W.time
+    run(29); ok("PR-G: re-ask waits 30 s", since("A", "Buyer", texp) == 0)
+    run(12); ok("PR-G: one re-ask 30-40 s after the cut", since("A", "Buyer", texp) == 1, since("A", "Buyer", texp))
+    run(300)
+    ok("PR-G: the owner answers and the scan completes", G(m2).full == L(own2).full and said("Buyer", "prices updated from Seller's scan", c0) == 1, G(m2).full - L(own2).full)
+    ok("PR-G: re-ask only once per cut", since("A", "Buyer", texp) == 1, since("A", "Buyer", texp))
+    cur = m2; ok("PR-G: a complete scan clears the cut from status", not m2.ns.sync.status():find("was cut", 1, true))
+    ok("PR-G: lines appear once each", said("Buyer", "receiving prices from Seller", c0) == 2 and said("Buyer", "cut off", c0) == 1, said("Buyer", "receiving", c0))
+
+    -- cut by reload: the save holds shared prices newer than the last complete scan; one line, one ask at 30-40 s
+    run(700)                                                     -- past Seller's 10-min answer limit
+    local res4 = {}
+    for i = 1, 400 do res4[i] = R(60000 + i * 3, 1900 + i, 1) end
+    W.drop = function(msg) local s = msg:match("^D%d+,(%d+),"); return s and tonumber(s) >= 3 end
+    scan(own2, res4); run(20); W.drop = nil
+    local held = 0; for _, t in pairs(G(m2).t) do if t > G(m2).full then held = held + 1 end end
+    ok("PR-G: before the reload, newer partial prices are held", held > 0, held)
+    m2.guild = false                                             -- /reload: the old session's memory is gone
+    local m3 = { name = "Buyer", frames = {}, prefix = {}, ns = {}, guild = true }
+    clients[#clients + 1] = m3
+    cur = m3; AHProfitDB = m2.db
+    for _, f in ipairs({ "Core.lua", "Sync.lua" }) do assert(loadfile("AHProfit/" .. f))("AHProfit", m3.ns) end
+    local c1, tl = #chat, W.time
+    fire(m3, "ADDON_LOADED", "AHProfit"); m3.db = AHProfitDB; m3.slash = SlashCmdList.AHPROFIT
+    fire(m3, "PLAYER_LOGIN")
+    ok("PR-G: reload cut detected at login, one line", said("Buyer", "the last price transfer from Seller (" .. held .. " items) was cut by a reload; asking the guild again.", c1) == 1, chat[#chat])
+    run(13); ok("PR-G: no extra ask at 12 s after a reload cut", since("A", "Buyer", tl) == 0, since("A", "Buyer", tl))
+    run(30); ok("PR-G: one ask 30-40 s after login", since("A", "Buyer", tl) == 1, since("A", "Buyer", tl))
+    run(700)
+    ok("PR-G: the reload cut is filled in (at the scan's 10-min mark)", G(m3).full == L(own2).full and since("A", "Buyer", tl) == 1, G(m3).full - L(own2).full)
+    local c2 = #chat
+    m3.guild = false
+    local m4 = { name = "Buyer", frames = {}, prefix = {}, ns = {}, guild = true }
+    clients[#clients + 1] = m4
+    cur = m4; AHProfitDB = m3.db
+    for _, f in ipairs({ "Core.lua", "Sync.lua" }) do assert(loadfile("AHProfit/" .. f))("AHProfit", m4.ns) end
+    fire(m4, "ADDON_LOADED", "AHProfit"); fire(m4, "PLAYER_LOGIN")
+    local tl2 = W.time; run(13)
+    ok("PR-G: a normal login has no cut line and asks at 12 s", said("Buyer", "cut by a reload", c2) == 0 and since("A", "Buyer", tl2) == 1)
+    m4.guild = false
+
+    -- answer limit: five asks within 10 min, one broadcast; an ask after 10 min is answered
+    local own3 = client("Banker"); scan(own3, big); run(120)
+    own2.guild = false
+    run(700)
+    local ta = W.time
+    for i = 1, 5 do
+        fire(own3, "CHAT_MSG_ADDON", "AHProfit", "Q1,0", "GUILD", "Asker" .. i .. "-Realm", "", 0, 0, "", 0)
+        run(110)
+    end
+    run(40)
+    ok("PR-G: five asks within 10 min, one broadcast", since("H", "Banker", ta) == 1, since("H", "Banker", ta))
+    run(30)                                                      -- the 10-min mark of the answer
+    ok("PR-G: the asks inside the window are served by one re-send at its end", since("H", "Banker", ta) == 2, since("H", "Banker", ta))
+    run(700)
+    local tb = W.time
+    fire(own3, "CHAT_MSG_ADDON", "AHProfit", "Q1,0", "GUILD", "Asker6-Realm", "", 0, 0, "", 0); run(30)
+    ok("PR-G: an ask outside the window is answered at once", since("H", "Banker", tb) == 1, since("H", "Banker", tb))
+    -- an ask during a running broadcast is served, but not before the 10 min are up
+    local huge = {}
+    for i = 1, 3000 do huge[i] = R(70000 + i * 7, 500 + i, 1) end
+    run(700); scan(own3, huge); run(5)
+    local tc = W.time
+    fire(own3, "CHAT_MSG_ADDON", "AHProfit", "Q1,0", "GUILD", "Late-Realm", "", 0, 0, "", 0)
+    run(60)
+    ok("PR-G: an ask during a broadcast is not answered at once", since("H", "Banker", tc) == 0, since("H", "Banker", tc))
+    run(600)
+    ok("PR-G: ...it is answered once, 10 min after the last answer", since("H", "Banker", tc) == 1, since("H", "Banker", tc))
+    -- the existing rule: no answer when the scan is not newer than the asker's, or more than 12 h old
+    local td = W.time
+    fire(own3, "CHAT_MSG_ADDON", "AHProfit", "Q1," .. L(own3).full, "GUILD", "Equal-Realm", "", 0, 0, "", 0); run(700)
+    ok("PR-G: no answer when the scan is not newer", since("H", "Banker", td) == 0)
+    run(12 * 3600)
+    local te = W.time
+    fire(own3, "CHAT_MSG_ADDON", "AHProfit", "Q1,0", "GUILD", "Old-Realm", "", 0, 0, "", 0); run(60)
+    ok("PR-G: no answer when the scan is over 12 h old", since("H", "Banker", te) == 0)
+    own3.guild = false
+
+    -- ask / offer / pick: the newest scan is picked, equal times go to the lowest name
+    local function offline(name) local cl = client(name); cl.guild = false; run(13); return cl end
+    local function prices(base) local r = {} for i = 1, 300 do r[i] = R(80000 + i * 3, base + i, 1) end return r end
+    local o300, o40, o5 = offline("Old300"), offline("Mid40"), offline("New5")
+    scan(o300, prices(1000)); run(260 * 60 - 1.5)
+    scan(o40, prices(2000)); run(35 * 60 - 1.5)
+    scan(o5, prices(3000)); run(5 * 60 - 1.5)
+    local ask = offline("Asker")
+    cur = o300; local age300 = (W.time - L(o300).full) / 60
+    cur = o40; local age40 = (W.time - L(o40).full) / 60
+    cur = o5; local age5 = (W.time - L(o5).full) / 60
+    ok("PR-G order: scans are about 300, 40 and 5 min old", math.abs(age300 - 300) < 1 and math.abs(age40 - 40) < 1 and math.abs(age5 - 5) < 1, age300 .. " " .. age40 .. " " .. age5)
+    for _, cl in ipairs({ o300, o40, o5, ask }) do cl.guild = true end
+    local tn = W.time
+    cur = ask; ask.ns.sync.ask(); run(120)
+    ok("PR-G order: only the newest owner (5 min) broadcasts", since("H", "New5", tn) == 1 and since("H", "Mid40", tn) == 0 and since("H", "Old300", tn) == 0,
+        since("H", "New5", tn) .. " " .. since("H", "Mid40", tn) .. " " .. since("H", "Old300", tn))
+    ok("PR-G order: the asker has the newest scan", G(ask).full == L(o5).full and G(ask).p[80003] == 3001)
+    ok("PR-G order: the older owners took the newer scan as guild prices", G(o40).full == L(o5).full and G(o300).full == L(o5).full)
+    for _, cl in ipairs({ o300, o40, o5, ask }) do cl.guild = false end
+    -- two owners with scans of the same age: at most one broadcast
+    local e1, e2 = offline("EqualA"), offline("EqualB")
+    scan(e1, prices(4000)); scan(e2, prices(5000))
+    cur = e2; L(e2).full = (function() cur = e1; return L(e1).full end)()
+    run(20 * 60)
+    local ask2 = offline("Asker2")
+    for _, cl in ipairs({ e1, e2, ask2 }) do cl.guild = true end
+    local tq2 = W.time
+    cur = ask2; ask2.ns.sync.ask(); run(120)
+    local nH = since("H", "EqualA", tq2) + since("H", "EqualB", tq2)
+    cur = e1; local tE = L(e1).full
+    ok("PR-G order: equally old scans, one broadcast", nH == 1, nH)
+    ok("PR-G order: the asker has that scan", G(ask2).full == tE)
+    for _, cl in ipairs({ e1, e2, ask2 }) do cl.guild = false end
+    -- either way the receiver keeps only the newest: two owners both send (older one first)
+    run(11 * 60)
+    local f1, f2, rx = offline("FirstOld"), offline("SecondNew"), offline("Receiver")
+    scan(f1, prices(6000)); run(60); scan(f2, prices(7000))
+    for _, cl in ipairs({ f1, f2, rx }) do cl.guild = true end
+    cur = f1; f1.ns.sync.broadcast(true); run(1)
+    cur = f2; f2.ns.sync.broadcast(true); run(120)
+    cur = f2; local tNew = L(f2).full
+    ok("PR-G order: two broadcasts, the receiver keeps the newest scan only", G(rx).full == tNew and G(rx).p[80003] == 7001 and G(rx).t[80003] == tNew, tostring(G(rx).p[80003]))
+    cur = f1; f1.ns.sync.broadcast(true); run(120)
+    ok("PR-G order: an older scan arriving later changes nothing", G(rx).full == tNew and G(rx).p[80003] == 7001)
+    for _, cl in ipairs({ f1, f2, rx }) do cl.guild = false end
+    -- equal scan time: the lowest name is picked
+    run(11 * 60)
+    local zb, za, ask3 = offline("Zulu"), offline("Alpha"), offline("Asker3")
+    scan(zb, prices(8000)); scan(za, prices(9000))
+    cur = za; local tz = L(za).full; cur = zb; L(zb).full = tz
+    for _, cl in ipairs({ zb, za, ask3 }) do cl.guild = true end
+    local tq3 = W.time
+    cur = ask3; ask3.ns.sync.ask(); run(120)
+    ok("PR-G pick: both owners offered", since("O", "Zulu", tq3) == 1 and since("O", "Alpha", tq3) == 1)
+    ok("PR-G pick: equal times, the lowest name is picked and sends", since("H", "Alpha", tq3) == 1 and since("H", "Zulu", tq3) == 0, since("H", "Alpha", tq3) .. " " .. since("H", "Zulu", tq3))
+    cur = ask3; local st3 = ask3.ns.sync.status()
+    ok("PR-G pick: status lists the offers heard", st3:find("Guild prices available: Alpha %d+m %(300 items%), Zulu %d+m %(300 items%)%.") ~= nil, st3)
+    for _, cl in ipairs({ zb, za, ask3 }) do cl.guild = false end
+    -- two askers in the same second: one broadcast
+    run(11 * 60)
+    local ow, a1, a2 = offline("Holder"), offline("AskOne"), offline("AskTwo")
+    scan(ow, prices(9500))
+    for _, cl in ipairs({ ow, a1, a2 }) do cl.guild = true end
+    local tt = W.time
+    cur = a1; a1.ns.sync.ask(); cur = a2; a2.ns.sync.ask(); run(120)
+    ok("PR-G pick: two askers in the same second, one offer and one broadcast", since("O", "Holder", tt) == 1 and since("H", "Holder", tt) == 1 and since("P", "AskOne", tt) == 1 and since("P", "AskTwo", tt) == 1,
+        since("O", "Holder", tt) .. " " .. since("H", "Holder", tt))
+    ok("PR-G pick: both askers have the scan", G(a1).full == L(ow).full and G(a2).full == L(ow).full)
+    run(700)
+    ok("PR-G pick: and no second broadcast 10 min later (both were in the round)", since("H", "Holder", tt) == 1, since("H", "Holder", tt))
+    -- a pick naming someone else, or a scan time that is not the owner's current one, is ignored
+    local tp = W.time
+    fire(ow, "CHAT_MSG_ADDON", "AHProfit", "P1,Someone," .. L(ow).full, "GUILD", "Picker-Realm", "", 0, 0, "", 0)
+    fire(ow, "CHAT_MSG_ADDON", "AHProfit", "P1,Holder," .. (L(ow).full - 60), "GUILD", "Picker-Realm", "", 0, 0, "", 0)
+    run(30)
+    ok("PR-G pick: a pick for someone else or for a stale scan time is ignored", since("H", "Holder", tp) == 0, since("H", "Holder", tp))
+    -- a pick within 10 min of an answer is ignored; a pick while sending is served once the 10 min are up
+    fire(ow, "CHAT_MSG_ADDON", "AHProfit", "P1,Holder," .. L(ow).full, "GUILD", "Picker-Realm", "", 0, 0, "", 0); run(30)
+    local tr2 = W.time
+    fire(ow, "CHAT_MSG_ADDON", "AHProfit", "P1,Holder," .. L(ow).full, "GUILD", "Picker2-Realm", "", 0, 0, "", 0); run(300)
+    ok("PR-G pick: a pick from a member who asked before the broadcast is not re-sent", since("H", "Holder", tp) == 1 and since("H", "Holder", tr2) == 0, since("H", "Holder", tp))
+    -- five members ask and pick inside the window: exactly one re-send, at its end
+    local t5 = W.time
+    for i = 1, 5 do
+        fire(ow, "CHAT_MSG_ADDON", "AHProfit", "A1,0", "GUILD", "Window" .. i .. "-Realm", "", 0, 0, "", 0)
+        fire(ow, "CHAT_MSG_ADDON", "AHProfit", "P1,Holder," .. L(ow).full, "GUILD", "Window" .. i .. "-Realm", "", 0, 0, "", 0)
+        run(40)
+    end
+    ok("PR-G pick: picks inside the window are not sent at once", since("H", "Holder", t5) == 0)
+    run(400)
+    ok("PR-G pick: five picks in the window, exactly one re-send at its end", since("H", "Holder", t5) == 1, since("H", "Holder", t5))
+    run(1200)
+    ok("PR-G pick: ...and no more after it", since("H", "Holder", t5) == 1, since("H", "Holder", t5))
+    local hugeP = {}
+    for i = 1, 3000 do hugeP[i] = R(90000 + i * 7, 700 + i, 1) end
+    run(700); ow.guild = false; scan(ow, hugeP); ow.guild = true
+    fire(ow, "CHAT_MSG_ADDON", "AHProfit", "P1,Holder," .. L(ow).full, "GUILD", "Picker3-Realm", "", 0, 0, "", 0); run(5)
+    local ts2 = W.time
+    fire(ow, "CHAT_MSG_ADDON", "AHProfit", "A1,0", "GUILD", "Picker4-Realm", "", 0, 0, "", 0)          -- asked after the start
+    fire(ow, "CHAT_MSG_ADDON", "AHProfit", "P1,Holder," .. L(ow).full, "GUILD", "Picker4-Realm", "", 0, 0, "", 0)
+    run(200)
+    ok("PR-G pick: a pick while sending is not served at once", since("H", "Holder", ts2) == 0)
+    run(500)
+    ok("PR-G pick: ...it is served once 10 min after the answer", since("H", "Holder", ts2) == 1, since("H", "Holder", ts2))
+    -- the live case: a reload in the middle of a large broadcast (shared after a scan); the re-ask at login comes
+    -- while the owner is still sending, so it is sent again right after the share (round 2, item 6)
+    run(700)
+    local big2, viewer = offline("BigOwner"), offline("Viewer")
+    local bigP = {}
+    for i = 1, 3000 do bigP[i] = R(110000 + i * 7, 900 + i, 1) end
+    big2.guild, viewer.guild = true, true
+    scan(big2, bigP); run(18)                                     -- 18 s into the transfer
+    local heldV = 0; for _, t in pairs(G(viewer).t) do if t > G(viewer).full then heldV = heldV + 1 end end
+    ok("PR-G live: part of the scan arrived before the reload", heldV > 0 and heldV < 3000, heldV)
+    viewer.guild = false
+    local v2 = { name = "Viewer", frames = {}, prefix = {}, ns = {}, guild = true }
+    clients[#clients + 1] = v2
+    cur = v2; AHProfitDB = viewer.db
+    for _, f in ipairs({ "Core.lua", "Sync.lua" }) do assert(loadfile("AHProfit/" .. f))("AHProfit", v2.ns) end
+    fire(v2, "ADDON_LOADED", "AHProfit"); fire(v2, "PLAYER_LOGIN")
+    local tv = W.time
+    run(45)                                                      -- the re-ask 30-40 s after the login
+    cur = big2; ok("PR-G live: the re-ask and pick arrive while the owner is still sending", since("P", "Viewer", tv) == 1 and big2.ns.sync.status():find("Sending your scan now", 1, true) ~= nil, since("P", "Viewer", tv))
+    run(180 - 45 - 18)                                           -- 3 min after the cut (18 s into the transfer)
+    ok("PR-G live: re-sent once right after the share; the reloaded member has the whole scan within about 3 min", since("H", "BigOwner", tv) == 1 and G(v2).full == L(big2).full, since("H", "BigOwner", tv) .. " " .. G(v2).full - L(big2).full)
+    run(1200)
+    ok("PR-G live: ...and nothing more", since("H", "BigOwner", tv) == 1, since("H", "BigOwner", tv))
+    big2.guild, v2.guild = false, false
+    -- no offer when the scan is not newer than the asker's, or more than 12 h old
+    ow.guild = true
+    run(700); local tn0 = W.time
+    cur = ow; local tow = L(ow).full
+    fire(ow, "CHAT_MSG_ADDON", "AHProfit", "A1," .. tow, "GUILD", "Equal-Realm", "", 0, 0, "", 0); run(30)
+    ok("PR-G offer: none when the scan is not newer than the asker's", since("O", "Holder", tn0) == 0)
+    fire(ow, "CHAT_MSG_ADDON", "AHProfit", "A1," .. (tow - 1), "GUILD", "Older-Realm", "", 0, 0, "", 0); run(30)
+    ok("PR-G offer: one when it is newer (control)", since("O", "Holder", tn0) == 1)
+    run(12 * 3600 + 60); local t12 = W.time
+    fire(ow, "CHAT_MSG_ADDON", "AHProfit", "A1,0", "GUILD", "Late-Realm", "", 0, 0, "", 0); run(30)
+    ok("PR-G offer: none when the scan is more than 12 h old", since("O", "Holder", t12) == 0)
+    -- a remembered pick is dropped when the owner has a newer scan by the window's end, or the scan turned 12 h old
+    local function hFor(from, t0, scanT)
+        local n = 0
+        for _, m in ipairs(W.log) do
+            if m.from == from and m.at >= t0 and m.msg:match("^H%d+,%d+,(%d+),") == tostring(scanT) then n = n + 1 end
+        end
+        return n
+    end
+    for _, cl in ipairs(clients) do cl.guild = false end          -- only Keeper and injected members below
+    local kp = offline("Keeper"); scan(kp, prices(9600)); kp.guild = true; run(30)
+    local tw = W.time
+    cur = kp; local tOld = L(kp).full
+    fire(kp, "CHAT_MSG_ADDON", "AHProfit", "A1,0", "GUILD", "First-Realm", "", 0, 0, "", 0)
+    fire(kp, "CHAT_MSG_ADDON", "AHProfit", "P1,Keeper," .. L(kp).full, "GUILD", "First-Realm", "", 0, 0, "", 0); run(150)
+    local sentOld = since("H", "Keeper", tw)
+    fire(kp, "CHAT_MSG_ADDON", "AHProfit", "A1,0", "GUILD", "Queued-Realm", "", 0, 0, "", 0)
+    fire(kp, "CHAT_MSG_ADDON", "AHProfit", "P1,Keeper," .. L(kp).full, "GUILD", "Queued-Realm", "", 0, 0, "", 0)
+    run(120); cur = kp; L(kp).full = math.floor(W.time)            -- a newer complete scan inside the window, not shared
+    local tNew2 = L(kp).full
+    run(600)                                                       -- past the old scan's window end
+    ok("PR-G pick: a remembered pick for a scan that is no longer current is dropped, and nothing else is sent", sentOld == 1 and hFor("Keeper", tw, tOld) == 1 and since("H", "Keeper", tw) == 1,
+        hFor("Keeper", tw, tOld) .. " " .. hFor("Keeper", tw, tNew2))
+    kp.guild = false
+    local aged = offline("Aged")
+    scan(aged, prices(9800)); aged.guild = true
+    run(12 * 3600 - 300)                                                  -- the scan is 11 h 55 min old
+    local tg = W.time
+    fire(aged, "CHAT_MSG_ADDON", "AHProfit", "A1,0", "GUILD", "One-Realm", "", 0, 0, "", 0)
+    fire(aged, "CHAT_MSG_ADDON", "AHProfit", "P1,Aged," .. L(aged).full, "GUILD", "One-Realm", "", 0, 0, "", 0); run(30)
+    fire(aged, "CHAT_MSG_ADDON", "AHProfit", "A1,0", "GUILD", "Two-Realm", "", 0, 0, "", 0)
+    fire(aged, "CHAT_MSG_ADDON", "AHProfit", "P1,Aged," .. L(aged).full, "GUILD", "Two-Realm", "", 0, 0, "", 0)
+    run(900)
+    ok("PR-G pick: a remembered pick is dropped once the scan is over 12 h old", since("H", "Aged", tg) == 1, since("H", "Aged", tg))
+    aged.guild = false
+    ow.guild = true
+    -- a picked owner that never sends is skipped; one more round picks the next owner
+    for _, cl in ipairs(clients) do cl.guild = false end
+    local hon, vic = offline("Honest2"), offline("Victim")
+    scan(hon, prices(9900)); run(60)
+    hon.guild, vic.guild = true, true
+    local function toVic(msg, from) fire(vic, "CHAT_MSG_ADDON", "AHProfit", msg, "GUILD", from .. "-Realm", "", 0, 0, "", 0) end
+    local tf = W.time
+    cur = vic; vic.ns.sync.ask()
+    local fakeT = math.floor(W.time)
+    toVic("O1," .. fakeT .. ",5000,0", "Faker")                  -- made up: newer than anyone's, never sent
+    run(6)
+    local function pickTimes(name) local o = {} for _, m in ipairs(W.log) do if m.from == "Victim" and m.at >= tf and m.msg:find("^P1," .. name .. ",") then o[#o + 1] = m.at - tf end end return o end
+    ok("PR-G skip: the fake newest offer is picked first", #pickTimes("Faker") == 1, #pickTimes("Faker"))
+    run(30)
+    toVic("O1," .. fakeT .. ",5000,0", "Faker")                  -- offers again in the next round: left out
+    run(15)
+    local ths = times("H", "Honest2", tf)
+    ok("PR-G skip: no header in 30 s, one more round, the honest owner sends within about 40 s", #ths == 1 and ths[1] - tf <= 45 and #pickTimes("Faker") == 1 and #pickTimes("Honest2") == 1,
+        tostring(ths[1] and (ths[1] - tf)) .. " " .. #pickTimes("Faker") .. " " .. #pickTimes("Honest2"))
+    run(120)
+    cur = vic; ok("PR-G skip: and the asker has the honest scan", G(vic).full == L(hon).full)
+    -- only one extra round per ask: if the next pick never sends either, no third ask
+    hon.guild = false
+    run(700); local tf2 = W.time
+    cur = vic; vic.ns.sync.ask()
+    toVic("O1," .. math.floor(W.time) .. ",5000,0", "FakeOne"); run(36)
+    toVic("O1," .. math.floor(W.time) .. ",5000,0", "FakeTwo"); run(80)
+    ok("PR-G skip: at most one extra round per ask", since("A", "Victim", tf2) == 2 and since("P", "Victim", tf2) == 2, since("A", "Victim", tf2) .. " " .. since("P", "Victim", tf2))
+    -- a skipped owner that offers a new scan time can be picked again
+    run(700); local tf3 = W.time
+    cur = vic; vic.ns.sync.ask()
+    local fakeT2 = math.floor(W.time)
+    toVic("O1," .. fakeT2 .. ",5000,0", "Faker"); run(6)
+    ok("PR-G skip: a skipped owner with a new scan time is eligible again", #pickTimes("Faker") == 2 and since("P", "Victim", tf3) == 1, #pickTimes("Faker"))
+    run(60)
+    -- an honest slow start (its header 25 s after the pick) is not skipped
+    run(700); local tf4 = W.time
+    cur = vic; vic.ns.sync.ask()
+    local slowT = math.floor(W.time)
+    toVic("O1," .. slowT .. ",3,0", "Slow"); run(6)
+    run(19)
+    local chS, nS = vic.ns.sync.encode({ p = { [7] = 70, [8] = 80, [9] = 90 }, q = {} })
+    toVic("H1,515151," .. slowT .. "," .. nS .. "," .. #chS, "Slow")
+    for i, pl in ipairs(chS) do toVic("D515151," .. i .. "," .. pl, "Slow") end
+    run(60)
+    ok("PR-G skip: an honest owner whose header comes 25 s after the pick is not skipped", since("A", "Victim", tf4) == 1 and since("P", "Victim", tf4) == 1 and G(vic).full == slowT,
+        since("A", "Victim", tf4) .. " " .. since("P", "Victim", tf4))
+    -- an owner still inside its 10 min says in its offer how long it waits, and is not skipped meanwhile
+    hon.guild = true; run(700)
+    local tw5 = W.time
+    cur = hon; hon.ns.sync.broadcast(true); run(60)               -- its window starts
+    G(vic).full = 0
+    for id in pairs(G(vic).t) do G(vic).t[id] = 0 end                -- the asker lost the scan (as after a cut)
+    cur = vic; vic.ns.sync.ask(); run(6)
+    local waitSeen
+    for _, m in ipairs(W.log) do if m.from == "Honest2" and m.at >= tw5 and m.msg:sub(1, 1) == "O" then waitSeen = tonumber(m.msg:match(",(%d+)$")) end end
+    ok("PR-G skip: an owner inside its window offers with the seconds it waits", waitSeen and waitSeen > 400 and waitSeen <= 600, tostring(waitSeen))
+    run(120)
+    ok("PR-G skip: ...and the asker does not skip it or ask again meanwhile", since("A", "Victim", tw5) == 1 and since("P", "Victim", tw5) == 1)
+    run(500)
+    ok("PR-G skip: ...the scan arrives at the window's end", since("H", "Honest2", tw5) == 2 and G(vic).full == L(hon).full, since("H", "Honest2", tw5))
+    vic.guild, hon.guild = false, false
+    -- unknown kinds are ignored without an error and without a reply
+    local tu = W.time
+    local okU = pcall(function()
+        for _, msg in ipairs({ "Z1,5", "X", "A9,5", "O1,5", "O1," .. math.floor(W.time) .. ",0", "P1,,5", "P1," .. string.rep("N", 80) .. ",5" }) do
+            fire(ow, "CHAT_MSG_ADDON", "AHProfit", msg, "GUILD", "Future-Realm", "", 0, 0, "", 0)
+        end
+    end)
+    run(30)
+    ok("PR-G: unknown or malformed kinds are ignored without an error or a reply", okU and since("H", "Holder", tu) + since("O", "Holder", tu) == 0)
+    ow.guild = false
+end
+
+-- ---- PR-G review round 1 (مانع): F1-F5, the login ask, the fallback Q, the receiving line
+do
+    local function since(kind, from, t0)
+        local n = 0
+        for _, m in ipairs(W.log) do if m.msg:sub(1, 1) == kind and m.from == from and m.at >= t0 then n = n + 1 end end
+        return n
+    end
+    local function msgs(kind, from, t0)
+        local o = {}
+        for _, m in ipairs(W.log) do if m.msg:sub(1, 1) == kind and m.from == from and m.at >= t0 then o[#o + 1] = m end end
+        return o
+    end
+    local function said(who, pat, c0)
+        local n = 0
+        for i = c0 + 1, #chat do if chat[i]:find(who .. ": ", 1, true) == 1 and chat[i]:find(pat, 1, true) then n = n + 1 end end
+        return n
+    end
+    local function alone() for _, cl in ipairs(clients) do cl.guild = false end end
+    local function reload(old)                                    -- /reload: same save, fresh session
+        old.guild = false
+        local c = { name = old.name, frames = {}, prefix = {}, ns = {}, guild = true }
+        clients[#clients + 1] = c
+        cur = c; AHProfitDB = old.db
+        for _, f in ipairs({ "Core.lua", "Sync.lua" }) do assert(loadfile("AHProfit/" .. f))("AHProfit", c.ns) end
+        fire(c, "ADDON_LOADED", "AHProfit"); c.db = AHProfitDB; c.slash = SlashCmdList.AHPROFIT
+        fire(c, "PLAYER_LOGIN")
+        return c
+    end
+    local function forget(c) cur = c; local H = c.ns.shared(); H.full = 0; for id in pairs(H.t) do H.p[id], H.q[id], H.t[id] = nil, nil, nil end end
+    local function items(base, n) local r = {} for i = 1, n do r[i] = R(base + i * 3, 300 + i, 1) end return r end
+
+    -- F1: a member logging in a minute after an answer broadcast finished gets the scan at the 10-min mark
+    alone(); run(700)
+    local keeper = client("Keeper"); scan(keeper, items(110000, 400)); run(700)   -- its own share is long over
+    local t1 = W.time
+    local first = client("First"); run(60)
+    local hs = msgs("H", "Keeper", t1)
+    ok("F1: First's ask is answered with one broadcast", #hs == 1 and G(first).full == L(keeper).full, #hs)
+    local sentAt = hs[1] and hs[1].at or 0
+    run(60)
+    local second = client("Second"); run(20)
+    local os2 = msgs("O", "Keeper", W.time - 20)
+    local w = os2[1] and tonumber(os2[1].msg:match(",(%d+)$"))
+    ok("F1: the owner, inside its window, still offers, with the seconds it waits", w and w > 400 and w <= 600, tostring(w))
+    run(sentAt + 600 - W.time - 5)
+    ok("F1: nothing more before the 10-min mark", since("H", "Keeper", t1) == 1 and G(second).full < L(keeper).full)
+    run(60)
+    ok("F1: Second has the scan at the 10-min mark, not after an hour", since("H", "Keeper", t1) == 2 and G(second).full == L(keeper).full, since("H", "Keeper", t1))
+    ok("F1: Second asked once, picked once", since("A", "Second", t1) == 1 and since("P", "Second", t1) == 1)
+
+    -- F2: a transfer longer than 15 min completes: 40,000 items, one broadcast, no cut line, no re-ask
+    alone(); run(700)
+    local bigOwner, rcv = client("BigScan"), client("Patient")
+    run(60)
+    local t2, c2 = W.time, #chat
+    local huge = {}
+    for i = 1, 40000 do huge[i] = R(200000 + i, 1000000 + i * 37, 1 + i % 97) end
+    scan(bigOwner, huge)
+    local hdr = msgs("H", "BigScan", t2)[1]
+    local nch = hdr and tonumber(hdr.msg:match(",(%d+)$")) or 0
+    run(1400)
+    ok("F2: the transfer takes longer than 15 min", nch > 900 and nch * 1.05 > 900, nch)
+    ok("F2: 40,000 items arrive complete", G(rcv).full == L(bigOwner).full, G(rcv).full - L(bigOwner).full)
+    ok("F2: one broadcast, no cut line, no re-ask", since("H", "BigScan", t2) == 1 and said("Patient", "cut off", c2) == 0 and since("A", "Patient", t2) == 0,
+        since("H", "BigScan", t2) .. " " .. said("Patient", "cut off", c2) .. " " .. since("A", "Patient", t2))
+    -- a transfer that stops is still cut: 15 min after its last chunk
+    run(700)
+    forget(rcv); local t2b, c2b = W.time, #chat
+    W.drop = function(msg) local s = msg:match("^D%d+,(%d+),"); return s and tonumber(s) >= 101 end
+    cur = bigOwner; bigOwner.ns.sync.broadcast(true); run(130)
+    W.drop = function(msg) return msg:sub(1, 1) == "D" end         -- the rest never comes
+    run(900 - 30); local cutEarly = said("Patient", "cut off", c2b)
+    run(150); W.drop = nil
+    ok("F2: a transfer that stops is cut 15 min after its last chunk", cutEarly == 0 and said("Patient", "cut off", c2b) == 1, cutEarly .. " " .. said("Patient", "cut off", c2b))
+    alone(); run(1500)
+
+    -- F3: two askers 0-4 s apart pick the same owner every time (offers heard just before a round count)
+    local alpha, zulu = client("Alpha"), client("Zulu")
+    local same = items(130000, 250)
+    scan(alpha, same); scan(zulu, same); run(30)
+    cur = alpha; local ta = L(alpha).full
+    L(zulu).full = ta                                            -- equal scan times
+    local ask1, ask2 = client("AskerOne"), client("AskerTwo")
+    run(1300)                                                    -- their login asks, and any re-send that follows, are over
+    local bad, double = 0, 0
+    local function lastH() local t = -1e9; for _, m in ipairs(W.log) do if (m.from == "Alpha" or m.from == "Zulu") and m.msg:sub(1, 1) == "H" then t = math.max(t, m.at) end end return t end
+    for i = 1, 40 do
+        run(math.max(120, lastH() + 610 - W.time))               -- each run starts after the owners' 10 min are over
+        forget(ask1); forget(ask2)
+        math.randomseed(i)
+        local t3 = W.time
+        cur = ask1; ask1.ns.sync.ask()
+        run((i - 1) % 5 + math.random() * 0.5)
+        cur = ask2; ask2.ns.sync.ask()
+        run(60)
+        local p1, p2 = msgs("P", "AskerOne", t3)[1], msgs("P", "AskerTwo", t3)[1]
+        local o1, o2 = p1 and p1.msg:match("^P1,([^,]+),"), p2 and p2.msg:match("^P1,([^,]+),")
+        if o1 ~= o2 or not o1 then bad = bad + 1; end
+        if since("H", "Alpha", t3) + since("H", "Zulu", t3) ~= 1 then double = double + 1 end
+        run(700)
+        if since("H", "Alpha", t3) + since("H", "Zulu", t3) ~= 1 then double = double + 1 end   -- nor a second one later
+    end
+    ok("F3: 40 seeded runs at 0-4 s apart: the same pick every time", bad == 0, bad)
+    ok("F3: ...and one broadcast every time", double == 0, double)
+    alone(); run(700)
+
+    -- F5: the reload-cut line and its re-ask once per cut transfer; none when your own scan is newer
+    local src, cutm = client("Source"), client("CutOff")
+    run(60)
+    W.drop = function(msg) local s = msg:match("^D%d+,(%d+),"); return s and tonumber(s) >= 3 end
+    scan(src, items(140000, 400)); run(30); W.drop = nil
+    src.guild = false                                            -- the owner logs off: nobody can fill it in
+    local c5 = #chat
+    local r1 = reload(cutm); local tr1 = W.time; run(60)
+    ok("F5: first login after the cut: the line and one ask", said("CutOff", "was cut by a reload", c5) == 1 and since("A", "CutOff", tr1) == 1)
+    run(700); local c5b = #chat
+    local r2 = reload(r1); local tr2 = W.time; run(60)
+    ok("F5: the next login: no line, the ordinary ask at 12 s", said("CutOff", "was cut by a reload", c5b) == 0 and since("A", "CutOff", tr2) == 1,
+        said("CutOff", "was cut by a reload", c5b))
+    ok("F5: the announced scan time is saved", r2.db.cutSaid ~= nil and r2.db.cutSaid > 0)
+    run(700); r2.db.cutSaid = nil                                -- (as if not yet announced) but your own scan is newer:
+    cur = r2; scan(r2, items(150000, 300)); run(30)
+    local c5c = #chat
+    local r3 = reload(r2); run(60)
+    ok("F5: no cut line when your own complete scan is at least as new", said("CutOff", "was cut by a reload", c5c) == 0)
+    alone(); run(700)
+
+    -- the login ask waits when a transfer is already coming in: one broadcast, not two
+    local giver = client("Giver"); run(60)
+    giver.guild = false; run(700); giver.guild = true
+    local t6 = W.time
+    local late = client("Arrival")
+    run(8); scan(giver, items(160000, 3000))                    -- its header about 10 s after Arrival's login
+    run(900)
+    ok("login ask: none while a header's transfer is coming in", since("A", "Arrival", t6) == 0, since("A", "Arrival", t6))
+    ok("login ask: one broadcast, and Arrival has the scan", since("H", "Giver", t6) == 1 and G(late).full == L(giver).full, since("H", "Giver", t6))
+    alone(); run(700)
+
+    -- fallback Q: an A round without offers asks once the old way, so a 0.6.0 owner's scan arrives
+    local old = client("OldOwner")
+    local orig = old.ns.sync.receive
+    old.ns.sync.receive = function(p, text, ...) if type(text) == "string" and text:match("^[AOP]") then return end return orig(p, text, ...) end   -- 0.6.0 ignores A/O/P
+    scan(old, items(170000, 300)); run(60)
+    old.guild = false; run(700); old.guild = true
+    local t7 = W.time
+    local nw = client("NewMember"); run(60)
+    ok("fallback Q: no offer within 5 s: one Q", since("A", "NewMember", t7) == 1 and since("Q", "NewMember", t7) == 1 and msgs("Q", "NewMember", t7)[1].at - msgs("A", "NewMember", t7)[1].at <= 6)
+    ok("fallback Q: the 0.6.0 owner's scan arrives", G(nw).full == L(old).full)
+    cur = nw; forget(nw); nw.ns.sync.ask(); run(60)
+    ok("fallback Q: not again within 10 min", since("Q", "NewMember", t7) == 1)
+    alone(); run(700)
+    local fresh = client("OfferingOwner"); scan(fresh, items(180000, 200)); run(30)
+    fresh.guild = false; run(700); fresh.guild = true
+    local t8 = W.time
+    local nw2 = client("NewMember2"); run(60)
+    ok("fallback Q: with a 0.6.1 owner that offers, no Q", since("Q", "NewMember2", t8) == 0 and G(nw2).full == L(fresh).full)
+    alone(); run(700)
+
+    -- the receiving line: at most once per sender per 10 min
+    local tgt = client("Target"); run(30)
+    local c9 = #chat
+    for i = 1, 20 do
+        fire(tgt, "CHAT_MSG_ADDON", "AHProfit", "H1," .. (300000 + i) .. "," .. (math.floor(W.time) - 100 + i) .. ",50,2", "GUILD", "Noisy-Realm", "", 0, 0, "", 0)
+        run(20)
+    end
+    ok("receiving line: 20 headers in 7 min from one member, one line", said("Target", "receiving prices from Noisy", c9) == 1, said("Target", "receiving prices from Noisy", c9))
+    run(300)
+    fire(tgt, "CHAT_MSG_ADDON", "AHProfit", "H1,300099," .. math.floor(W.time) .. ",50,2", "GUILD", "Noisy-Realm", "", 0, 0, "", 0)
+    ok("receiving line: again after 10 min", said("Target", "receiving prices from Noisy", c9) == 2)
+    alone()
+end
+
+-- ---- PR-G review round 2 (مانع): one window for picks and Q, from the header actually going out
+do
+    local function hs(from, t0) local o = {} for _, m in ipairs(W.log) do if m.msg:sub(1, 1) == "H" and m.from == from and m.at >= t0 then o[#o + 1] = math.floor(m.at - t0 + 0.5) end end return o end
+    local function alone() for _, cl in ipairs(clients) do cl.guild = false end end
+    local function to(c, msg, from) fire(c, "CHAT_MSG_ADDON", "AHProfit", msg, "GUILD", from .. "-Realm", "", 0, 0, "", 0) end
+    local function items(base, n) local r = {} for i = 1, n do r[i] = R(base + i * 3, 300 + i, 1) end return r end
+    local function str(t) return table.concat(t, ",") end
+    alone(); run(700)
+    local o = client("Owner2"); run(30)
+    local function fresh(name) alone(); run(700); o = client(name); run(30) end   -- a fresh owner: each scan complete
+    -- item 1: a Q after the share is remembered and served at the window's end, not at once
+    local t1 = W.time
+    scan(o, items(400000, 400)); run(120)
+    to(o, "Q1,0", "OldAsker"); run(1300)
+    local h1 = hs("Owner2", t1)
+    ok("R2-1: share at 0, Q at 120 s: the Q is served at the window's end", #h1 == 2 and h1[2] >= 595 and h1[2] <= 615, str(h1))
+    -- item 1 / 6: a Q while the share is going out: once, right after it; then nothing until the window's end
+    fresh("OwnerB"); local t2 = W.time
+    scan(o, items(410000, 3000)); run(20)
+    to(o, "Q1,0", "OldAsker2"); run(1300)
+    local h2 = hs("OwnerB", t2)
+    ok("R2-1: Q 20 s into the share: one re-send right after it, then nothing", #h2 == 2 and h2[2] < 150, str(h2))
+    -- item 2: any broadcast of the scan clears a remembered pick
+    fresh("OwnerC"); local t3 = W.time
+    scan(o, items(420000, 400)); run(100)
+    to(o, "A1,0", "LatePick"); to(o, "P1,OwnerC," .. L(o).full, "LatePick"); run(200)
+    cur = o; o.slash("share"); run(1300)
+    local h3 = hs("OwnerC", t3)
+    ok("R2-2: share at 0, pick at 100 s, /ahp share at 300 s: no third broadcast", #h3 == 2, str(h3))
+    -- item 3: the window starts when the header goes out, not when the broadcast is queued
+    fresh("OwnerD"); o.guild = false; scan(o, items(425000, 400)); run(30); o.guild = true   -- a scan not shared
+    local t4 = W.time
+    W.fail = 30; to(o, "A1,0", "Starter"); to(o, "P1,OwnerD," .. L(o).full, "Starter"); run(200); W.fail = 0
+    local h4 = hs("OwnerD", t4)
+    run((h4[1] or 0) + 560 - (W.time - t4))
+    to(o, "A1,0", "Inside"); to(o, "P1,OwnerD," .. L(o).full, "Inside"); run(10)
+    ok("R2-3: refused sends delay the header; a pick 560 s after it is inside the window", #h4 == 1 and h4[1] >= 140 and #hs("OwnerD", t4) == 1, str(hs("OwnerD", t4)))
+    run(100)
+    ok("R2-3: ...and served at the window's end", #hs("OwnerD", t4) == 2, str(hs("OwnerD", t4)))
+    -- item 4: an ask heard after the header went out, in the same server second, is a later round
+    fresh("OwnerE"); o.guild = false; scan(o, items(428000, 400)); run(30); o.guild = true
+    W.time = math.floor(W.time) + 1.1; local t5 = W.time
+    to(o, "A1,0", "Early"); to(o, "P1,OwnerE," .. L(o).full, "Early")   -- answered at once: header at x.1
+    run(0.5)
+    to(o, "A1,0", "SameSecond"); to(o, "P1,OwnerE," .. L(o).full, "SameSecond")
+    run(700)
+    local h5 = hs("OwnerE", t5)
+    ok("R2-4: an ask after the header in the same second is served at the window's end", #h5 == 2 and h5[2] >= 595 and h5[2] <= 615, str(h5))
+    -- item 5: at most 50 offers per round
+    run(700)
+    local asker = client("Collector"); run(30)
+    cur = asker; asker.ns.sync.ask()
+    local base = math.floor(W.time) - 1000
+    for i = 1, 60 do to(asker, "O1," .. (base + i) .. ",100,0", "Off" .. string.format("%02d", i)) end
+    local t6 = W.time; run(6)
+    local p
+    for _, m in ipairs(W.log) do if m.from == "Collector" and m.at >= t6 and m.msg:sub(1, 1) == "P" then p = m.msg end end
+    ok("R2-5: offers past the 50th in a round are dropped", p ~= nil and p:find("^P1,Off50,") ~= nil, tostring(p))
+    alone(); run(100)
+    -- item 6: five picks while the share goes out: exactly one re-send right after it, then nothing until the end
+    fresh("Owner3"); local t7 = W.time
+    scan(o, items(430000, 3000)); run(10)
+    for i = 1, 5 do to(o, "A1,0", "During" .. i); to(o, "P1,Owner3," .. L(o).full, "During" .. i); run(12) end
+    run(200)
+    local h7 = hs("Owner3", t7)
+    ok("R2-6: five picks during the share: exactly one re-send, right after it", #h7 == 2 and h7[2] < 150, str(h7))
+    to(o, "A1,0", "After"); to(o, "P1,Owner3," .. L(o).full, "After")
+    run((h7[2] or 0) + 590 - (W.time - t7))
+    ok("R2-6: ...then nothing until the window's end", #hs("Owner3", t7) == 2, str(hs("Owner3", t7)))
+    run(100)
+    ok("R2-6: ...where the pick heard meanwhile is served once", #hs("Owner3", t7) == 3, str(hs("Owner3", t7)))
+    run(1300)
+    ok("R2-6: ...and nothing more", #hs("Owner3", t7) == 3, str(hs("Owner3", t7)))
+    alone()
+end
+
+-- ---- PR-G review round 3 (مانع, S1): skips expire at the next regular ask; stray chunks; ready owners first
+do
+    local function alone() for _, cl in ipairs(clients) do cl.guild = false end end
+    local function to(c, msg, from) fire(c, "CHAT_MSG_ADDON", "AHProfit", msg, "GUILD", from .. "-Realm", "", 0, 0, "", 0) end
+    local function items(base, n) local r = {} for i = 1, n do r[i] = R(base + i * 3, 300 + i, 1) end return r end
+    local function since(kind, from, t0) local n = 0; for _, m in ipairs(W.log) do if m.msg:sub(1, 1) == kind and m.from == from and m.at >= t0 then n = n + 1 end end return n end
+    local function picks(from, t0) local o = {} for _, m in ipairs(W.log) do if m.from == from and m.at >= t0 and m.msg:sub(1, 1) == "P" then o[#o + 1] = m.msg:match("^P1,([^,]+),") end end return o end
+    local function reload(old)
+        old.guild = false
+        local c = { name = old.name, frames = {}, prefix = {}, ns = {}, guild = true }
+        clients[#clients + 1] = c
+        cur = c; AHProfitDB = old.db
+        for _, f in ipairs({ "Core.lua", "Sync.lua" }) do assert(loadfile("AHProfit/" .. f))("AHProfit", c.ns) end
+        fire(c, "ADDON_LOADED", "AHProfit"); c.db = AHProfitDB; c.slash = SlashCmdList.AHPROFIT
+        fire(c, "PLAYER_LOGIN")
+        return c
+    end
+    local function skippedOf(c)                                   -- the asker's skip table, through upvalues
+        local seen = {}
+        local function find(f, depth)
+            if depth > 4 or seen[f] then return end
+            seen[f] = true
+            for i = 1, 200 do
+                local k, v = debug.getupvalue(f, i)
+                if k == nil then break end
+                if k == "skipped" then return v end
+                if type(v) == "function" then local r = find(v, depth + 1); if r then return r end end
+            end
+        end
+        return find(c.ns.sync.ask, 0) or {}
+    end
+    local function count(t) local n = 0; for _ in pairs(t) do n = n + 1 end return n end
+
+    -- case 1: an owner inside its window remembers the pick, then reloads; the asker gets it within about 1 h
+    alone(); run(700)
+    local own = client("Reloader"); run(30)
+    scan(own, items(500000, 400)); run(60)
+    local tl = W.time
+    local asker = client("Waiter"); run(30)                        -- picks Reloader, which is inside its window
+    ok("S1 case 1: the pick is remembered by the owner (inside its window)", #picks("Waiter", tl) == 1 and picks("Waiter", tl)[1] == "Reloader")
+    run(30); own = reload(own)                                     -- the remembered pick is lost
+    run(3900 + 120)
+    ok("S1 case 1: the asker has the scan within about 1 h and a round", G(asker).full == L(own).full, G(asker).full - L(own).full)
+    alone(); run(700)
+
+    -- case 2: an owner drops for 5 min after offering and returns with the same scan
+    local own2 = client("Dropper"); run(30)
+    own2.guild = false; scan(own2, items(510000, 400)); run(30); own2.guild = true
+    run(700)
+    local t2 = W.time
+    local asker2 = client("Waiter2")
+    run(12 + 4); own2.guild = false                               -- after its offer, before the pick
+    run(300); own2.guild = true
+    run(3900 + 120)
+    ok("S1 case 2: the asker has the scan within about 1 h and a round", G(asker2).full == L(own2).full and #picks("Waiter2", t2) >= 2, G(asker2).full - L(own2).full)
+    ok("S1: skips are gone after the regular ask", count(skippedOf(asker2)) == 0, count(skippedOf(asker2)))
+    alone(); run(700)
+
+    -- a fake that keeps the same scan time is still skipped within one round
+    local v = client("Victim3"); run(30)
+    local tf = W.time
+    cur = v; v.ns.sync.ask()
+    local fakeT = math.floor(W.time)
+    to(v, "O1," .. fakeT .. ",500,0", "Faker3"); run(36)
+    to(v, "O1," .. fakeT .. ",500,0", "Faker3"); run(10)
+    ok("S1: a fake with the same scan time is left out of the next round", since("A", "Victim3", tf) == 2 and #picks("Victim3", tf) == 1, since("A", "Victim3", tf) .. " " .. #picks("Victim3", tf))
+    -- a skip expires after 1 h even without a regular ask
+    local sk = skippedOf(v)
+    ok("S1: the skip is recorded", sk.Faker3 ~= nil)
+    v.guild = false; run(3700); v.guild = true                    -- (no regular ask meanwhile: only the 1 h limit)
+    cur = v; v.ns.sync.ask(true)                                  -- a retry round: expired skips are purged
+    ok("S1: an expired skip is purged", sk.Faker3 == nil)
+    -- no skip while sync is off
+    run(700); local ts = W.time
+    cur = v; v.ns.sync.ask()
+    to(v, "O1," .. math.floor(W.time) .. ",500,0", "Faker4"); run(6)
+    cur = v; v.slash("sync off"); run(40); cur = v; v.slash("sync on")
+    ok("S1: no skip and no retry recorded while sync is off", skippedOf(v).Faker4 == nil and since("A", "Victim3", ts) == 1)
+    -- (a) a stray chunk from the picked owner, without its header, does not count as alive
+    run(700); local td = W.time
+    cur = v; v.ns.sync.ask()
+    to(v, "O1," .. math.floor(W.time) .. ",500,0", "Stray"); run(10)
+    to(v, "D123456,1,AAAA", "Stray"); run(30)
+    ok("(a) a stray chunk without a header does not keep the pick alive", since("A", "Victim3", td) == 2 and skippedOf(v).Stray ~= nil, since("A", "Victim3", td))
+    -- a header of another version does not keep the pick alive either
+    run(700); local tv = W.time
+    cur = v; v.ns.sync.ask()
+    local tv0 = math.floor(W.time)
+    to(v, "O1," .. tv0 .. ",500,0", "OtherVer"); run(10)
+    to(v, "H2,654321," .. tv0 .. ",500,5", "OtherVer"); run(30)
+    ok("a header of another version does not keep the pick alive", since("A", "Victim3", tv) == 2 and skippedOf(v).OtherVer ~= nil, since("A", "Victim3", tv))
+    -- (b) at equal times the owner ready to send (wait 0) is picked; never an older scan for that
+    run(700); local tb = W.time
+    cur = v; v.ns.sync.ask()
+    local tt = math.floor(W.time) - 10
+    to(v, "O1," .. tt .. ",500,400", "Aaron"); to(v, "O1," .. tt .. ",500,0", "Zed"); run(6)
+    ok("(b) equal scan times: the owner with wait 0 is picked over a lower name", picks("Victim3", tb)[1] == "Zed", tostring(picks("Victim3", tb)[1]))
+    -- a repeated offer at the same time refreshes its wait: the owner now ready wins
+    run(700); local tr = W.time
+    cur = v; v.ns.sync.ask()
+    local tq = math.floor(W.time) - 10
+    to(v, "O1," .. tq .. ",500,3", "Zeta"); to(v, "O1," .. tq .. ",500,201", "Alpha"); run(2)
+    to(v, "O1," .. tq .. ",500,0", "Zeta"); run(4)
+    ok("a repeated offer at the same time updates the wait; the owner with wait 0 wins", picks("Victim3", tr)[1] == "Zeta", tostring(picks("Victim3", tr)[1]))
+    run(700); local tr2 = W.time
+    cur = v; v.ns.sync.ask()
+    local tq2 = math.floor(W.time) - 10
+    to(v, "O1," .. tq2 .. ",500,0", "Zeta"); to(v, "O1," .. tq2 .. ",500,0", "Alpha"); run(2)
+    to(v, "O1," .. tq2 .. ",500,600", "Alpha"); run(4)                -- Alpha began sending and offers again
+    ok("...but a repeat never raises the wait: Alpha, which offered 0 first, stays picked", picks("Victim3", tr2)[1] == "Alpha", tostring(picks("Victim3", tr2)[1]))
+    run(700); local tb2 = W.time
+    cur = v; v.ns.sync.ask()
+    to(v, "O1," .. (tt + 300) .. ",500,400", "Newer"); to(v, "O1," .. (tt + 200) .. ",500,0", "Older"); run(6)
+    ok("(b) a newer scan with a wait still beats an older one ready now", picks("Victim3", tb2)[1] == "Newer", tostring(picks("Victim3", tb2)[1]))
+    alone()
 end
 print(pass .. " passed, " .. fail .. " failed")
 os.exit(fail == 0 and 0 or 1)
