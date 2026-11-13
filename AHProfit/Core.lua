@@ -408,6 +408,7 @@ end
 -- Hold Shift for the extra lines (your stack, deposit, your own record with this item).
 local function addLines(tt, id)
     if not DB or not DB.enabled or type(id) ~= "number" then return end
+    if ns.writs_ui then ns.writs_ui.tipLines(tt, id) end         -- a Waylaid Crate or Craftsman's Writ: what it asks for
     local _, _, quality, _, _, _, _, _, _, _, vendor, _, _, bind = C_Item.GetItemInfo(id)
     if secret(vendor) or secret(bind) or secret(quality) then return end
     if bind == 1 or bind == 4 then return end                    -- bind on pickup and quest items cannot be auctioned
