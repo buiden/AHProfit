@@ -529,7 +529,7 @@ local function finish()
     local L, known = live(), 0
     for _ in pairs(L.p) do known = known + 1 end
     -- Only a scan that plausibly covered the whole house may forget items; a narrow search must not wipe the rest.
-    if scanCount >= 200 and scanCount * 2 >= known then
+    if not foreign and scanCount >= 200 and scanCount * 2 >= known then   -- (foreign: a search of the player's came in)
         for id in pairs(L.p) do
             if seen[id] ~= scanId then L.p[id], L.q[id], L.t[id] = nil, nil, nil end
         end
@@ -593,6 +593,7 @@ local function startScan(auto)
         return
     end
     if not pendingStart then                                     -- the estimate: items in the last full scan, own or guild
+        scanCount = 0                                            -- (not the previous browse's count)
         local L, H, n = live(), shared(), 0
         local layer = (H.full > L.full) and H or (L.full > 0 and L) or nil
         if layer then for _ in pairs(layer.p) do n = n + 1 end end
@@ -635,14 +636,21 @@ f:SetScript("OnEvent", function(_, ev, a1)
         if TooltipDataProcessor and Enum and Enum.TooltipDataType then
             TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Item, onTooltip)
         end
-        -- A browse query we did not send while scanning (the player's search, or Favorites) replaces the scan's results.
-        -- A post-hook on the game's API table: it runs after the call and never touches the auction house window.
-        if hooksecurefunc and C_AuctionHouse then
-            for _, fn in ipairs({ "SendBrowseQuery", "SearchForFavorites" }) do
-                if type(C_AuctionHouse[fn]) == "function" then
-                    pcall(hooksecurefunc, C_AuctionHouse, fn, function() if scanning and not ours then foreign = true end end)
-                end
+        -- A browse query of the player's while scanning (a search, or other filters or sorting) replaces the scan's
+        -- results. A post-hook on the game's API table: it runs after the call, only sets a flag, and never touches
+        -- the auction house window. Favorites searches are not watched: if one does replace the scan, the
+        -- completeness rule rejects it as ended short.
+        if hooksecurefunc and C_AuctionHouse and type(C_AuctionHouse.SendBrowseQuery) == "function" then
+            local function empty(t) return t == nil or (type(t) == "table" and next(t) == nil) end
+            local function sameAsOurs(q)
+                if type(q) ~= "table" or (q.searchString or "") ~= "" or not empty(q.filters) or not empty(q.itemClassFilters) then return false end
+                local s = q.sorts
+                return type(s) == "table" and #s == 1 and type(s[1]) == "table" and s[1].sortOrder == Enum.AuctionHouseSortOrder.Price
+                    and not s[1].reverseSort and next(s, 1) == nil
             end
+            pcall(hooksecurefunc, C_AuctionHouse, "SendBrowseQuery", function(q)
+                if scanning and not ours and not sameAsOurs(q) then foreign = true end
+            end)
         end
         if C_AuctionHouse and C_AuctionHouse.SendBrowseQuery then
             for _, e in ipairs({ "AUCTION_HOUSE_SHOW", "AUCTION_HOUSE_CLOSED", "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED",

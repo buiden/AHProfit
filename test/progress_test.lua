@@ -267,6 +267,52 @@ openAH(); slash("scan"); run(0.5)
 ok("on again: the window shows", shown())
 closeAH()
 
+-- ---- review round 1 (مانع)
+-- S1: the auction house reopened within 5 s of finishing: the finished window still hides
+db = boot({})
+openAH(); slash("scan"); run(0.5)
+firstPage(items(0, 100)); run(1.5); addPage(items(100, 100)); run(1.5); addPage(items(200, 100), true); run(0.5)
+ok("S1: finished", line():find("^finished: 300 items") ~= nil, line())
+closeAH(); run(2); openAH()                                    -- reopened 2-3 s later
+run(10)
+ok("S1: reopened within 5 s: the finished window still hides", not shown())
+-- S2: closed while waiting to start, after a browse of 37 items: the count is this scan's (0)
+run(1000)
+firstPage(items(7000, 37), true); run(1)                       -- the player's own browse before the scan
+local s2 = said("scan stopped: the auction house was closed (0 items).")
+W.ready = false; slash("scan"); run(0.5)
+closeAH(); W.ready = true
+ok("S2: closed before the first page: 0 items, not the previous browse's", said("scan stopped: the auction house was closed (0 items).") == s2 + 1, chat[#chat])
+-- S3: a Favorites search before our first page that never answers leaves the scan running
+openAH(); run(1000)
+slash("scan"); run(0.5)
+C_AuctionHouse.SearchForFavorites()
+firstPage(items(0, 100)); run(1.5); addPage(items(100, 100)); run(1.5); addPage(items(200, 100), true); run(0.5)
+ok("S3: an unanswered Favorites call does not stop the scan", line():find("^finished: 300 items") ~= nil, line())
+run(6)
+-- S3: the same query as ours (blank search sorted by price) is not a replacement
+run(1000); local full1 = ns.live().full
+slash("scan"); run(0.5)
+C_AuctionHouse.SendBrowseQuery({ searchString = "", filters = {}, itemClassFilters = {}, sorts = { { sortOrder = 0, reverseSort = false } } })
+firstPage(items(0, 100)); run(1.5); addPage(items(100, 100)); run(1.5); addPage(items(200, 100), true); run(0.5)
+ok("S3: a query the same as ours does not stop the scan", ns.live().full > full1, line())
+run(6)
+-- S3: a search of the player's, then our last page arriving as more results: not complete
+run(1000); local full2, c0 = ns.live().full, #chat
+slash("scan"); run(0.5)
+firstPage(items(0, 100)); run(1.5); addPage(items(100, 100)); run(1.5)
+C_AuctionHouse.SendBrowseQuery({ searchString = "ore", filters = {}, sorts = {} })
+addPage(items(200, 100), true); run(0.5)
+ok("S3: a foreign search, then the last page: no complete scan", ns.live().full == full2, line())
+ok("S3: ...said as ended early", said("scan ended early with 300 items") >= 1, chat[#chat])
+run(6)
+-- note: /ahp progress on during a running scan shows the window at once
+db = boot({}); slash("progress off")
+openAH(); slash("scan"); run(0.5); firstPage(items(0, 100)); run(1.5)
+slash("progress on")
+ok("progress on during a scan: shown at once, with the count", shown() and line():find("^100 items") ~= nil, line())
+closeAH()
+
 -- ---- old saves without the new fields
 local okOld = pcall(boot, { v = 3, live = { ["Realm|Alliance"] = { p = { [5] = 1 }, q = { [5] = 1 }, t = { [5] = 1 }, full = 0 } } })
 ok("an old save without the new fields loads", okOld and AHProfitDB.progress == nil and AHProfitDB.progressPos == nil)

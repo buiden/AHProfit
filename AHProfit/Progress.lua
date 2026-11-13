@@ -1,6 +1,7 @@
 -- AH Profit scan progress: a small movable window while a full auction house scan runs, with the reason when a scan
 -- stops early. It is a plain frame on UIParent: it is never parented to the auction house window and hooks none of
--- its functions, so it cannot taint it, and it is small enough never to cover the auction house list.
+-- its functions, so it cannot taint it. By default it sits top right, clear of the auction house list; it can be
+-- dragged anywhere.
 -- Saved: AHProfitDB.progress (false = chat lines only) and AHProfitDB.progressPos (where it was dragged to).
 local _, ns = ...
 local P = {}
@@ -127,7 +128,7 @@ function P.done(text)
     frame.line:SetText(text)
     frame.state:SetText("")
     local mine = token
-    C_Timer.After(5, function() if token == mine and state == "done" and frame then frame:Hide() end end)
+    C_Timer.After(5, function() if token == mine and frame then frame:Hide() end end)   -- unless a newer scan has it
 end
 -- The scan stopped early: the reason stays until the window is closed or the auction house is opened again.
 function P.fail(text)
@@ -152,6 +153,10 @@ function P.slash(arg)
     if arg == "on" or arg == "off" then
         DB.progress = arg == "on"
         if arg == "off" and frame then frame:Hide() end
+        if arg == "on" and (state == "scanning" or state == "paused" or state == "waiting") then   -- a scan is running
+            show(); paint()
+            frame.state:SetText(state == "paused" and "paused while you sell" or state == "waiting" and "waiting for the server" or "")
+        end
         ns.say("scan progress window " .. arg .. "." .. (arg == "off" and " Scan results still show in chat." or ""))
         return true
     elseif arg == "reset" then
