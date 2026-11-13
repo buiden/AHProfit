@@ -448,6 +448,10 @@ end
 -- ------------------------------------------------------------------ recording the auction house while it is open --
 local open, scanning, waitingThrottle, pendingStart = false, false, false, false
 local scanId, seen, scanCount = 0, {}, 0
+local ours, foreign, estimate = false, false, nil
+local foreignOpen, foreignAt = false, -1e9                       -- a query of someone else's not answered yet, and when               -- sending our query; someone else's query during the scan;
+                                                                 -- items expected (progress)
+local function prog(fn, ...) local P = ns.progress; if P and P[fn] then P[fn](...) end end
 local pend = {}                    -- items seen in the current query, written to the daily history when it ends
 -- Writing re-encodes each item's string, so a full scan of thousands of items is spread over frames: up to
 -- HIST_BATCH items per frame, the rest on the next ones. Whatever is still waiting is written at logout (and at
@@ -526,15 +530,26 @@ local function finish()
     local L, known = live(), 0
     for _ in pairs(L.p) do known = known + 1 end
     -- Only a scan that plausibly covered the whole house may forget items; a narrow search must not wipe the rest.
-    if scanCount >= 200 and scanCount * 2 >= known then
+    if not foreign and scanCount >= 200 and scanCount * 2 >= known then   -- (foreign: a search of the player's came in)
         for id in pairs(L.p) do
             if seen[id] ~= scanId then L.p[id], L.q[id], L.t[id] = nil, nil, nil end
         end
         L.full = now()
         say("scan finished, " .. scanCount .. " items priced.")
-        if ns.sync then ns.sync.broadcast(true) end
+        local shared = ns.sync and ns.sync.broadcast(true)
+        local n = ns.progress and ns.progress.num(scanCount) or tostring(scanCount)
+        prog("done", "finished: " .. n .. " items" .. (shared and ", shared with your guild" or (DB.sync == false and " (sharing off)" or " (not shared)")))
+    elseif foreign then                                          -- a search of the player's came in
+        foreign = false
+        local text = "scan stopped: a search replaced it. Run /ahp scan to scan again."
+        say(text); prog("fail", text)
     else
-        say("scan ended early with " .. scanCount .. " items; older prices kept.")
+        local P, about = ns.progress, estimate or (known > scanCount and known) or nil
+        local why = about and about > scanCount and (" (only " .. (P and P.num(scanCount) or scanCount) .. " of about " .. (P and P.num(about) or about) .. " items)")
+            or (scanCount < 200 and " (fewer than 200 items)") or ""
+        local text = "scan ended early with " .. scanCount .. " items; older prices kept" .. why .. "."
+        say(text)
+        prog("fail", text)
     end
 end
 
@@ -565,9 +580,9 @@ end
 more = function()
     if not scanning then return end
     if C_AuctionHouse.HasFullBrowseResults() then return finish() end
-    if selling() then return later(1) end                        -- look again in a second; nothing is sent meanwhile
-    if C_AuctionHouse.IsThrottledMessageSystemReady() then C_AuctionHouse.RequestMoreBrowseResults()
-    else waitingThrottle = true end
+    if selling() then prog("state", "paused"); return later(1) end   -- look again in a second; nothing is sent meanwhile
+    if C_AuctionHouse.IsThrottledMessageSystemReady() then prog("state", "scanning"); C_AuctionHouse.RequestMoreBrowseResults()
+    else waitingThrottle = true; prog("state", "waiting") end
 end
 local function page()                                            -- a page arrived
     if scanning and autoRun and not C_AuctionHouse.HasFullBrowseResults() then later(GAP) else more() end
@@ -582,12 +597,33 @@ local function startScan(auto)
         C_Timer.After(2, function() if open and not scanning and not pendingStart then startScan(true) end end)
         return
     end
-    if not C_AuctionHouse.IsThrottledMessageSystemReady() then pendingStart = true; return end
-    pendingStart, scanning = false, true
-    C_AuctionHouse.SendBrowseQuery({
+    if not pendingStart then                                     -- the estimate: items in the last full scan, own or guild
+        scanCount = 0                                            -- (not the previous browse's count)
+        local L, H, n = live(), shared(), 0
+        local layer = (H.full > L.full) and H or (L.full > 0 and L) or nil
+        if layer then for _ in pairs(layer.p) do n = n + 1 end end
+        estimate = n > 0 and n or nil
+    end
+    if not C_AuctionHouse.IsThrottledMessageSystemReady() then
+        if not pendingStart then prog("start", estimate, true) end
+        pendingStart = true; return
+    end
+    -- A search sent just before (the player's) may still be answered: wait for that answer, 3 s at most, so it is not
+    -- taken for the scan's first page.
+    if foreignOpen and (GetTime and GetTime() or 0) - foreignAt < 3 then
+        if not pendingStart then prog("start", estimate, true) end
+        pendingStart = true
+        C_Timer.After(0.5, function() if open and pendingStart and not scanning then startScan(autoRun) end end)
+        return
+    end
+    if not pendingStart then prog("start", estimate) else prog("state", "scanning") end
+    pendingStart, scanning, foreign = false, true, false
+    ours = true
+    pcall(C_AuctionHouse.SendBrowseQuery, {
         searchString = "", filters = {}, itemClassFilters = {},
         sorts = { { sortOrder = Enum.AuctionHouseSortOrder.Price, reverseSort = false } },
     })
+    ours = false
 end
 ns.startScan = startScan
 
@@ -613,6 +649,17 @@ f:SetScript("OnEvent", function(_, ev, a1)
         if TooltipDataProcessor and Enum and Enum.TooltipDataType then
             TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Item, onTooltip)
         end
+        -- Any browse query not sent by the scan (the player's search, any filter, or another addon's) replaces the
+        -- scan's results, so it stops the scan. A post-hook on the game's API table: it runs after the call, reads
+        -- none of its arguments, only sets flags, and never touches the auction house window. Favorites searches are
+        -- not watched: a Favorites answer is rejected unless it covers half the house (the completeness rule).
+        if hooksecurefunc and C_AuctionHouse and type(C_AuctionHouse.SendBrowseQuery) == "function" then
+            pcall(hooksecurefunc, C_AuctionHouse, "SendBrowseQuery", function()
+                if ours then return end
+                foreignOpen, foreignAt = true, GetTime and GetTime() or 0
+                if scanning then foreign = true end
+            end)
+        end
         if C_AuctionHouse and C_AuctionHouse.SendBrowseQuery then
             for _, e in ipairs({ "AUCTION_HOUSE_SHOW", "AUCTION_HOUSE_CLOSED", "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED",
                 "AUCTION_HOUSE_BROWSE_RESULTS_ADDED", "AUCTION_HOUSE_BROWSE_FAILURE", "AUCTION_HOUSE_THROTTLED_SYSTEM_READY" }) do
@@ -621,22 +668,41 @@ f:SetScript("OnEvent", function(_, ev, a1)
         end
     elseif ev == "AUCTION_HOUSE_SHOW" then
         open = true
+        prog("opened")
         if DB.autoscan and C_AuctionHouse and C_AuctionHouse.SendBrowseQuery and now() - math.max(live().full, shared().full) > 900 then C_Timer.After(1, function() if open and not scanning then startScan(true) end end) end
     elseif ev == "PLAYER_LOGOUT" then
         ns.histFinish()                                          -- the game saves right after this
     elseif ev == "AUCTION_HOUSE_CLOSED" then
         flushHist()
-        open, scanning, waitingThrottle, pendingStart = false, false, false, false
+        if scanning or pendingStart then
+            local text = "scan stopped: the auction house was closed (" .. (ns.progress and ns.progress.num(scanCount) or scanCount)
+                .. " items). Nothing shared, older prices kept."
+            say(text); prog("fail", text)
+        end
+        open, scanning, waitingThrottle, pendingStart, foreign = false, false, false, false, false
     elseif ev == "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED" then
+        foreignOpen = false                                      -- (answers come in order: anything sent before is in)
         flushHist()                                              -- a new query: the previous one is complete
         scanId = scanId + 1; scanCount = 0
         record(C_AuctionHouse.GetBrowseResults())
+        if scanning and foreign then                             -- the player's own search replaced the scan's query
+            scanning, waitingThrottle, foreign = false, false, false
+            local text = "scan stopped: a search replaced it. Run /ahp scan to scan again."
+            say(text); prog("fail", text)
+            return
+        end
+        if scanning then prog("count", scanCount) end
         page()
     elseif ev == "AUCTION_HOUSE_BROWSE_RESULTS_ADDED" then
         record(a1)
+        if scanning then prog("count", scanCount) end
         page()
     elseif ev == "AUCTION_HOUSE_BROWSE_FAILURE" then
-        if scanning then scanning = false; say("the auction house refused the scan; try /ahp scan again.") end
+        if scanning then
+            scanning, foreign = false, false
+            local text = "the auction house refused the scan; try /ahp scan again."
+            say(text); prog("fail", text)
+        end
     elseif ev == "AUCTION_HOUSE_THROTTLED_SYSTEM_READY" then
         if pendingStart then startScan(autoRun)
         elseif waitingThrottle then waitingThrottle = false; more() end
@@ -653,7 +719,9 @@ SlashCmdList["AHPROFIT"] = function(msg)
     elseif msg == "session stop" and ns.tools then say(ns.tools.sessionStop() and "session stopped." or "no session is running."); if ns.ui then ns.ui:Refresh() end
     elseif msg == "scan" then startScan()
     elseif msg == "scan stop" then
-        if scanning or pendingStart then scanning, waitingThrottle, pendingStart = false, false, false; say("scan stopped; prices seen so far are kept.")
+        if scanning or pendingStart then
+            scanning, waitingThrottle, pendingStart, foreign = false, false, false, false
+            say("scan stopped; prices seen so far are kept."); prog("fail", "scan stopped by you; prices seen so far are kept.")
         else say("no scan is running.") end
     elseif msg == "on" or msg == "off" then DB.enabled = msg == "on"; say("tooltip lines " .. msg .. ".")
     elseif msg == "auto on" or msg == "auto off" then DB.autoscan = msg == "auto on"; say("scan when the auction house opens: " .. msg:sub(6) .. "." .. (DB.autoscan and " It stands still while you are on a Sell tab." or ""))
@@ -663,6 +731,7 @@ SlashCmdList["AHPROFIT"] = function(msg)
         if ns.ui then ns.ui:Refresh() end
     elseif msg == "sync on" or msg == "sync off" then DB.sync = msg == "sync on"; say("guild sharing " .. msg:sub(6) .. ".")
     elseif msg == "share" then if ns.sync then ns.sync.broadcast() end
+    elseif msg:match("^progress ") and ns.progress and ns.progress.slash(msg:sub(10)) then
     elseif ns.bags and ns.bags.slash(msg) then                   -- keep, unkeep, bagfull (Bags.lua)
     elseif msg == "cut 5" or msg == "cut 15" then DB.cut = tonumber(msg:sub(5)); say("cut set to " .. DB.cut .. "%."); if ns.ui then ns.ui:Refresh() end
     else
@@ -676,6 +745,6 @@ SlashCmdList["AHPROFIT"] = function(msg)
         if type(Auctionator) == "table" and type(Auctionator.API) == "table" then
             say("Auctionator: " .. (DB.useAuctionator == false and "off" or "on, its prices seen today fill in when yours are missing or over a day old") .. ".")
         end
-        say("/ahp farm | scan | scan stop | share | sync on | sync off | auctionator on | auctionator off | on | off | auto on | auto off | cut 5 | cut 15 | keep <item> | unkeep <item> | bagfull <0-20> | bagfull off")
+        say("/ahp farm | scan | scan stop | share | sync on | sync off | auctionator on | auctionator off | on | off | auto on | auto off | cut 5 | cut 15 | keep <item> | unkeep <item> | bagfull <0-20> | bagfull off | progress on | progress off | progress reset")
     end
 end
