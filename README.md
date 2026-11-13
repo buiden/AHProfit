@@ -46,6 +46,7 @@ Auctionator fixes its day when it loads, so after midnight its new scans are not
 | `/ahp cut 5`, `/ahp cut 15` | The auction house cut in percent |
 | `/ahp keep <item>`, `/ahp unkeep <item>` | Never (or again) suggest this item when the bags are full |
 | `/ahp bagfull <0-20>`, `/ahp bagfull off` | Warn when this many general bag slots are left (default 0) |
+| `/ahp progress on` / `off` / `reset` | The scan progress window (on by default; off = chat lines only); `reset` puts it back in the centre |
 
 **Bags full:** when your bags are full (the game's "Inventory is full", or no free slot left), a small window says
 what to do: first a free fix (merge two partial stacks), otherwise the least valuable slot to destroy, in a bag the
@@ -85,7 +86,7 @@ It also keeps, in its saved variables, records for tools outside the game (the R
 Lua 5.1, from the repository root:
 
 ```sh
-for t in harness ui_test sync_test extra_test ledger_test bagfull_test; do lua5.1 test/$t.lua; done
+for t in harness ui_test sync_test extra_test ledger_test bagfull_test progress_test; do lua5.1 test/$t.lua; done
 ```
 
 ## License

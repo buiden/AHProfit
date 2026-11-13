@@ -16,4 +16,5 @@ Farm.lua
 Tools.lua
 Extra.lua
 Bags.lua
+Progress.lua
 UI.lua
