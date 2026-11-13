@@ -6,9 +6,12 @@
 -- Messages (each at most 255 bytes, plain text):
 --   H<ver>,<session>,<scan time>,<items>,<chunks>     start of a scan
 --   D<session>,<chunk number>,<payload>               items: id step, price, quantity as base-32 digits
---   Q<ver>,<newest prices I have>                     sent at login, about once an hour and 30 s after a cut
---                                                     transfer; one member with newer prices answers (at most
---                                                     once per 10 min)
+--   Q<ver>,<newest prices I have>                     sent by 0.6.0 at login; one member with newer prices answers
+--   A<ver>,<newest prices I have>                     ask (0.6.1 on): at login, about once an hour, 30 s after a cut
+--   O<ver>,<scan time>,<items>                        offer: each owner of a newer complete scan, no prices
+--   P<ver>,<owner>,<scan time>                        pick: the asker names the newest offer; only that owner sends
+--   An owner answers a Q or a pick at most once per 10 min; one that comes while it is sending is served once
+--   the 10 min are up.
 --   G<ver>,<map>,<node>,<x>,<y>,<time>                one gathering node a member just picked (x, y in 1/1000 of the map)
 --   R<ver>,<nodes I know>                             sent at login; one member who knows more sends the newest ones
 local _, ns = ...
@@ -94,7 +97,7 @@ end
 local out, again, pending = nil, false, nil
 local ASKGAP, HOUR, JITTER, CUTWAIT = 600, 3600, 300, 30      -- asks: at most one per 10 min, hourly +-5 min, 30 s after a cut
 local lastAsk, lastAnswer, nextCheck, reask, cut = -1e9, -1e9, nil, false, nil
-local busy                                                   -- defined with the receiving side: a transfer is coming in
+local busy, mine, startRound                                 -- defined further down
 local function inGuild() return IsInGuild ~= nil and IsInGuild() and true or false end
 -- true = sent; false = try again later.
 local function send(msg)
@@ -134,7 +137,7 @@ function Y.broadcast(quiet)
     local sid = math.random(100000, 999999)
     local msgs = { "H" .. VER .. "," .. sid .. "," .. L.full .. "," .. n .. "," .. #chunks }
     for i = 1, #chunks do msgs[i + 1] = "D" .. sid .. "," .. i .. "," .. chunks[i] end
-    out = { msgs = msgs, i = 1, fails = 0, n = n, t = L.full }
+    out = { msgs = msgs, i = 1, fails = 0, n = n, t = L.full, started = ns.now() }
     again = false
     if not quiet then ns.say("sharing " .. n .. " prices with your guild, about " .. math.ceil(#msgs * GAP / 60) .. " min.") end
     pump(out)
@@ -143,7 +146,8 @@ end
 function Y.ask()
     if not on() or not inGuild() then return end
     local L, H = ns.live(), ns.shared()
-    if send("Q" .. VER .. "," .. math.floor(math.max(L.full, H.full, ns.seed and ns.seed.t or 0))) then lastAsk = ns.now() end
+    local have = math.floor(math.max(L.full, H.full, ns.seed and ns.seed.t or 0))
+    if send("A" .. VER .. "," .. have) then lastAsk = ns.now(); startRound(have) end
 end
 -- Answering: one broadcast per 10 min at most. A member who asked while a broadcast was running missed its start,
 -- so it is sent again once the 10 min are up.
@@ -243,7 +247,7 @@ local function expire(now)
         end
     end
 end
-local function mine(sender)
+mine = function(sender)
     local n, r = UnitName("player")
     if UnitFullName then n, r = UnitFullName("player") end
     if secret(n) or secret(r) or type(n) ~= "string" then return false end
@@ -332,6 +336,72 @@ local function request(have)
         if pending == tok and not out then lastAnswer = ns.now(); Y.broadcast(true) end
     end)
 end
+-- Asks from 0.6.1 on: ASK -> every owner of a newer complete scan OFFERs it (no prices) -> the asker PICKs the newest
+-- (equal times: the lowest name, so every asker picks the same owner) -> only that owner broadcasts. 0.6.0 owners
+-- ignore A, O and P, so they are not picked until they update; their own Q asks are still answered above.
+local OFFERWAIT, COLLECT = 3, 5
+local round, heard, lastOffer, askedAt = nil, {}, nil, {}
+local function ownCount(L)
+    local n = 0
+    for id, p in pairs(L.p) do if whole(id, 1e7) and id > 0 and whole(p, 1e12) and p > 0 then n = n + 1 end end
+    return n
+end
+local function offerFor(have, who)                               -- someone asked: offer your scan if it is newer
+    local L, now = ns.live(), ns.now()
+    local n = 0
+    for k, at in pairs(askedAt) do if now - at > 900 then askedAt[k] = nil else n = n + 1 end end
+    if n < 50 then askedAt[who] = now end                        -- when each member last asked (see picked)
+    if L.full <= have or now - L.full > 43200 then return end
+    if lastOffer and lastOffer.t == L.full and now - lastOffer.at < COLLECT then return end   -- one offer per round
+    lastOffer = { t = L.full, at = now }
+    local t = L.full
+    C_Timer.After(math.random() * OFFERWAIT, function()
+        local L2 = ns.live()
+        if L2.full ~= t or not on() or not inGuild() then return end
+        local n = ownCount(L2)
+        if n > 0 then send("O" .. VER .. "," .. t .. "," .. n) end  -- nothing to send: no offer, so it cannot be picked
+    end)
+end
+local function offerSeen(name, t, n)
+    local now = ns.now()
+    if not (whole(t, now + AHEAD) and t >= now - BEHIND and whole(n, 1e7) and n > 0) then return end
+    heard[name] = { t = t, n = n, at = now }
+    local count, oldest = 0, nil
+    for k, v in pairs(heard) do count = count + 1; if not oldest or v.at < heard[oldest].at then oldest = k end end
+    if count > 20 then heard[oldest] = nil end
+    if round and t > round.have then
+        local o = round.offers[name]
+        if not o or t > o then round.offers[name] = t end
+    end
+end
+local function finishRound(r)
+    if round ~= r then return end
+    round = nil
+    local best, bt
+    for name, t in pairs(r.offers) do
+        if not bt or t > bt or (t == bt and name < best) then best, bt = name, t end
+    end
+    if best and on() and inGuild() then send("P" .. VER .. "," .. best .. "," .. bt) end
+end
+startRound = function(have)
+    local r = { have = have, offers = {} }
+    round = r
+    C_Timer.After(COLLECT, function() finishRound(r) end)
+end
+-- Picked: the same limits as a Q answer. Sending already: a picker who asked after the broadcast began missed its
+-- start, so it is sent once more when 10 min have passed since the last answer; a picker from the same round has
+-- it. Answered in the last 10 min: ignored; the hourly ask comes back.
+local function picked(owner, t, who)
+    if not mine(owner) then return end                           -- someone else was picked
+    local L = ns.live()
+    if t ~= L.full then return end                               -- not the scan this owner has now
+    if out then
+        if out.t == t and (askedAt[who] or -1e9) > out.started then again = true end
+        return
+    end
+    if ns.now() - lastAnswer < ASKGAP then return end
+    pending = nil; lastAnswer = ns.now(); Y.broadcast(true)
+end
 function Y.receive(prefix, text, channel, sender)
     if secret(prefix) or secret(text) or secret(channel) or secret(sender) then return end
     if prefix ~= PFX or channel ~= "GUILD" or type(text) ~= "string" or type(sender) ~= "string" or #text > 255 then return end
@@ -348,6 +418,15 @@ function Y.receive(prefix, text, channel, sender)
     elseif k == "Q" then
         local ver, have = text:match("^Q(%d%d?),(%d%d?%d?%d?%d?%d?%d?%d?%d?%d?%d?)$")
         if ver and tonumber(ver) == VER then request(tonumber(have)) end
+    elseif k == "A" then
+        local ver, have = text:match("^A(%d%d?),(%d%d?%d?%d?%d?%d?%d?%d?%d?%d?%d?)$")
+        if ver and tonumber(ver) == VER then offerFor(tonumber(have), who) end
+    elseif k == "O" then
+        local ver, t, n = text:match("^O(%d%d?),(%d%d?%d?%d?%d?%d?%d?%d?%d?%d?%d?),(%d%d?%d?%d?%d?%d?%d?)$")
+        if ver and tonumber(ver) == VER then offerSeen(who, tonumber(t), tonumber(n)) end
+    elseif k == "P" then
+        local ver, owner, t = text:match("^P(%d%d?),([^,]+),(%d%d?%d?%d?%d?%d?%d?%d?%d?%d?%d?)$")
+        if ver and tonumber(ver) == VER and #owner <= 64 then picked(owner, tonumber(t), who) end
     elseif k == "G" then
         local ver, map, h, x, y, t = text:match("^G(%d%d?),(%d%d?%d?%d?%d?%d?),(%d%d?%d?%d?%d?%d?%d?),(%d%d?%d?%d?),(%d%d?%d?%d?),(%d%d?%d?%d?%d?%d?%d?%d?%d?%d?%d?)$")
         if ver and tonumber(ver) == VER then nodeSeen(sender, tonumber(map), tonumber(h), tonumber(x), tonumber(y), tonumber(t)) end
@@ -365,6 +444,18 @@ function Y.status()
     if DB.syncFrom and DB.syncAt then s = s .. " Last received: " .. DB.syncFrom .. "'s scan, " .. ns.age(DB.syncAt) .. "." end
     if cut then
         s = s .. " Last transfer from " .. cut.from .. " was cut (" .. cut.got .. (cut.n and (" of " .. cut.n) or " items arrived") .. ")."
+    end
+    local now, list = ns.now(), {}
+    for name, v in pairs(heard) do if now - v.at < 2 * HOUR and now - v.t < 43200 then list[#list + 1] = { name, v } end end
+    table.sort(list, function(x, y) if x[2].t ~= y[2].t then return x[2].t > y[2].t end return x[1] < y[1] end)
+    if #list > 0 then
+        local parts = {}
+        for i = 1, math.min(5, #list) do
+            local v, age = list[i][2], math.max(0, now - list[i][2].t)
+            local n = v.n >= 1000 and string.format("%d,%03d", math.floor(v.n / 1000), v.n % 1000) or tostring(v.n)
+            parts[#parts + 1] = list[i][1] .. " " .. (age < 3600 and (math.floor(age / 60) .. "m") or (math.floor(age / 3600) .. "h")) .. " (" .. n .. " items)"
+        end
+        s = s .. " Guild prices available: " .. table.concat(parts, ", ") .. "."
     end
     if nextCheck then s = s .. " Next check for newer guild prices in ~" .. math.max(1, math.ceil((nextCheck - ns.now()) / 60)) .. "m." end
     return s
