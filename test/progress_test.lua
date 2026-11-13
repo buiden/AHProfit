@@ -295,7 +295,7 @@ run(1000); local full1 = ns.live().full
 slash("scan"); run(0.5)
 C_AuctionHouse.SendBrowseQuery({ searchString = "", filters = {}, itemClassFilters = {}, sorts = { { sortOrder = 0, reverseSort = false } } })
 firstPage(items(0, 100)); run(1.5); addPage(items(100, 100)); run(1.5); addPage(items(200, 100), true); run(0.5)
-ok("S3: a query the same as ours does not stop the scan", ns.live().full > full1, line())
+ok("S3 (round 2): any query not sent by the scan stops it, even one the same as ours", ns.live().full == full1 and line() == "scan stopped: a search replaced it. Run /ahp scan to scan again.", line())
 run(6)
 -- S3: a search of the player's, then our last page arriving as more results: not complete
 run(1000); local full2, c0 = ns.live().full, #chat
@@ -304,13 +304,72 @@ firstPage(items(0, 100)); run(1.5); addPage(items(100, 100)); run(1.5)
 C_AuctionHouse.SendBrowseQuery({ searchString = "ore", filters = {}, sorts = {} })
 addPage(items(200, 100), true); run(0.5)
 ok("S3: a foreign search, then the last page: no complete scan", ns.live().full == full2, line())
-ok("S3: ...said as ended early", said("scan ended early with 300 items") >= 1, chat[#chat])
+ok("S3: ...said as a search replacing it", plain(chat[#chat]):find("scan stopped: a search replaced it.", 1, true) ~= nil, chat[#chat])
 run(6)
 -- note: /ahp progress on during a running scan shows the window at once
 db = boot({}); slash("progress off")
 openAH(); slash("scan"); run(0.5); firstPage(items(0, 100)); run(1.5)
 slash("progress on")
 ok("progress on during a scan: shown at once, with the count", shown() and line():find("^100 items") ~= nil, line())
+closeAH()
+
+-- ---- review round 2 (مانع)
+local function fullScan500()
+    run(1000); slash("scan"); run(0.5)
+    for p = 1, 5 do if p == 1 then firstPage(items(0, 100)) else addPage(items((p - 1) * 100, 100), p == 5) end run(1.5) end
+    run(6)
+end
+local function known() local n = 0; for _ in pairs(ns.live().p) do n = n + 1 end return n end
+db = boot({}); openAH()
+fullScan500()
+ok("R2 setup: a 500-item full scan", known() == 500 and line():find("^finished: 500") ~= nil, line())
+-- Q1/Q3: a level-filtered blank browse sorted by price replaces the scan: stopped, nothing deleted, nothing shared
+for _, case in ipairs({ { "Q1 level 60-70, 300 rows", 300 }, { "Q2-style level filter, 280 rows (under half)", 280 } }) do
+    run(1000); local f0, h0 = ns.live().full, sentH()
+    slash("scan"); run(0.5)
+    firstPage(items(0, 100)); run(1.5)
+    C_AuctionHouse.SendBrowseQuery({ searchString = "", minLevel = 60, maxLevel = 70, filters = {}, itemClassFilters = {}, sorts = { { sortOrder = 0, reverseSort = false } } })
+    firstPage(items(0, case[2]), true); run(2)
+    ok("R2 " .. case[1] .. ": no full scan, no prices deleted, nothing shared", ns.live().full == f0 and known() == 500 and sentH() == h0, known())
+end
+-- the same with the level filter's answer arriving as more results (our last page): still not complete
+run(1000); local f1 = ns.live().full
+slash("scan"); run(0.5); firstPage(items(0, 100)); run(1.5)
+C_AuctionHouse.SendBrowseQuery({ searchString = "", minLevel = 60, maxLevel = 70 })
+addPage(items(100, 300), true); run(2)
+ok("R2 level filter, then the last page as more results: not complete, said as a search", ns.live().full == f1 and known() == 500 and line() == "scan stopped: a search replaced it. Run /ahp scan to scan again.", line())
+-- a query whose fields throw does not raise an error in the hook
+run(1000); slash("scan"); run(0.5); firstPage(items(0, 100)); run(1.5)
+local okT = pcall(C_AuctionHouse.SendBrowseQuery, setmetatable({}, { __index = function() error("no") end }))
+firstPage(items(0, 50), true); run(2)
+ok("R2 a query with a throwing metatable: no error, the scan stops", okT and line() == "scan stopped: a search replaced it. Run /ahp scan to scan again.", tostring(okT) .. " " .. line())
+-- the auction house opened again mid-scan keeps the progress state; progress on then shows the window
+run(1000); slash("progress off"); slash("scan"); run(0.5); firstPage(items(0, 100)); run(1.5)
+fire("AUCTION_HOUSE_SHOW"); run(0.5)
+slash("progress on")
+ok("R2 AUCTION_HOUSE_SHOW again mid-scan, then progress on: shown with the count", shown() and line():find("^100 items") ~= nil and ns.progress.state_() == "scanning", tostring(ns.progress.state_()))
+closeAH(); openAH()
+-- stopped, then off, a new scan, on: the title is the scanning one
+slash("scan"); run(0.5); slash("scan stop"); run(1)
+slash("progress off"); run(1000); slash("scan"); run(0.5); firstPage(items(0, 100)); run(1.5)
+slash("progress on")
+ok("R2 stopped, off, scan, on: the scanning title", shown() and win().title.text == "AH Profit: scanning the auction house", win().title.text)
+closeAH(); openAH()
+-- a typed search sent just before the scan, answered after: not taken for the scan's first page
+run(1000); local f2, k2 = ns.live().full, W.sent or 0
+C_AuctionHouse.SendBrowseQuery({ searchString = "ore" })
+slash("scan"); run(0.2)
+ok("R2 late answer: the scan's query waits while a search just sent is unanswered", (W.sent or 0) == k2 + 1)
+firstPage(items(9000, 30), true); run(1)                        -- the typed search's answer
+ok("R2 late answer: the scan's query goes out right after that answer", (W.sent or 0) == k2 + 2, (W.sent or 0) - k2)
+for p = 1, 5 do if p == 1 then firstPage(items(0, 100)) else addPage(items((p - 1) * 100, 100), p == 5) end run(1.5) end
+ok("R2 late answer: then the scan runs and finishes with its own 500 items", (W.sent or 0) == k2 + 2 and ns.live().full > f2 and line():find("^finished: 500 items") ~= nil, line())
+run(6)
+-- ...and a search that is never answered delays the scan by 3 s at most
+run(1000); local k3 = W.sent or 0
+C_AuctionHouse.SendBrowseQuery({ searchString = "linen" })
+slash("scan"); run(4)
+ok("R2 an unanswered search delays the scan 3 s at most", (W.sent or 0) == k3 + 2, (W.sent or 0) - k3)
 closeAH()
 
 -- ---- old saves without the new fields

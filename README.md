@@ -46,7 +46,7 @@ Auctionator fixes its day when it loads, so after midnight its new scans are not
 | `/ahp cut 5`, `/ahp cut 15` | The auction house cut in percent |
 | `/ahp keep <item>`, `/ahp unkeep <item>` | Never (or again) suggest this item when the bags are full |
 | `/ahp bagfull <0-20>`, `/ahp bagfull off` | Warn when this many general bag slots are left (default 0) |
-| `/ahp progress on` / `off` / `reset` | The scan progress window (on by default; off = chat lines only); `reset` puts it back in the centre |
+| `/ahp progress on` / `off` / `reset` | The scan progress window (on by default; off = chat lines only); `reset` puts it back in the centre. Any auction house search not sent by the scan stops it; a Favorites answer is rejected unless it covers half the house |
 
 **Bags full:** when your bags are full (the game's "Inventory is full", or no free slot left), a small window says
 what to do: first a free fix (merge two partial stacks), otherwise the least valuable slot to destroy, in a bag the

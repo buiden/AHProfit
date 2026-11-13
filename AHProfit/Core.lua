@@ -448,7 +448,8 @@ end
 -- ------------------------------------------------------------------ recording the auction house while it is open --
 local open, scanning, waitingThrottle, pendingStart = false, false, false, false
 local scanId, seen, scanCount = 0, {}, 0
-local ours, foreign, estimate = false, false, nil               -- sending our query; someone else's query during the scan;
+local ours, foreign, estimate = false, false, nil
+local foreignOpen, foreignAt = false, -1e9                       -- a query of someone else's not answered yet, and when               -- sending our query; someone else's query during the scan;
                                                                  -- items expected (progress)
 local function prog(fn, ...) local P = ns.progress; if P and P[fn] then P[fn](...) end end
 local pend = {}                    -- items seen in the current query, written to the daily history when it ends
@@ -538,6 +539,10 @@ local function finish()
         local shared = ns.sync and ns.sync.broadcast(true)
         local n = ns.progress and ns.progress.num(scanCount) or tostring(scanCount)
         prog("done", "finished: " .. n .. " items" .. (shared and ", shared with your guild" or (DB.sync == false and " (sharing off)" or " (not shared)")))
+    elseif foreign then                                          -- a search of the player's came in
+        foreign = false
+        local text = "scan stopped: a search replaced it. Run /ahp scan to scan again."
+        say(text); prog("fail", text)
     else
         local P, about = ns.progress, estimate or (known > scanCount and known) or nil
         local why = about and about > scanCount and (" (only " .. (P and P.num(scanCount) or scanCount) .. " of about " .. (P and P.num(about) or about) .. " items)")
@@ -603,6 +608,14 @@ local function startScan(auto)
         if not pendingStart then prog("start", estimate, true) end
         pendingStart = true; return
     end
+    -- A search sent just before (the player's) may still be answered: wait for that answer, 3 s at most, so it is not
+    -- taken for the scan's first page.
+    if foreignOpen and (GetTime and GetTime() or 0) - foreignAt < 3 then
+        if not pendingStart then prog("start", estimate, true) end
+        pendingStart = true
+        C_Timer.After(0.5, function() if open and pendingStart and not scanning then startScan(autoRun) end end)
+        return
+    end
     if not pendingStart then prog("start", estimate) else prog("state", "scanning") end
     pendingStart, scanning, foreign = false, true, false
     ours = true
@@ -636,20 +649,15 @@ f:SetScript("OnEvent", function(_, ev, a1)
         if TooltipDataProcessor and Enum and Enum.TooltipDataType then
             TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Item, onTooltip)
         end
-        -- A browse query of the player's while scanning (a search, or other filters or sorting) replaces the scan's
-        -- results. A post-hook on the game's API table: it runs after the call, only sets a flag, and never touches
-        -- the auction house window. Favorites searches are not watched: if one does replace the scan, the
-        -- completeness rule rejects it as ended short.
+        -- Any browse query not sent by the scan (the player's search, any filter, or another addon's) replaces the
+        -- scan's results, so it stops the scan. A post-hook on the game's API table: it runs after the call, reads
+        -- none of its arguments, only sets flags, and never touches the auction house window. Favorites searches are
+        -- not watched: a Favorites answer is rejected unless it covers half the house (the completeness rule).
         if hooksecurefunc and C_AuctionHouse and type(C_AuctionHouse.SendBrowseQuery) == "function" then
-            local function empty(t) return t == nil or (type(t) == "table" and next(t) == nil) end
-            local function sameAsOurs(q)
-                if type(q) ~= "table" or (q.searchString or "") ~= "" or not empty(q.filters) or not empty(q.itemClassFilters) then return false end
-                local s = q.sorts
-                return type(s) == "table" and #s == 1 and type(s[1]) == "table" and s[1].sortOrder == Enum.AuctionHouseSortOrder.Price
-                    and not s[1].reverseSort and next(s, 1) == nil
-            end
-            pcall(hooksecurefunc, C_AuctionHouse, "SendBrowseQuery", function(q)
-                if scanning and not ours and not sameAsOurs(q) then foreign = true end
+            pcall(hooksecurefunc, C_AuctionHouse, "SendBrowseQuery", function()
+                if ours then return end
+                foreignOpen, foreignAt = true, GetTime and GetTime() or 0
+                if scanning then foreign = true end
             end)
         end
         if C_AuctionHouse and C_AuctionHouse.SendBrowseQuery then
@@ -673,6 +681,7 @@ f:SetScript("OnEvent", function(_, ev, a1)
         end
         open, scanning, waitingThrottle, pendingStart, foreign = false, false, false, false, false
     elseif ev == "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED" then
+        foreignOpen = false                                      -- (answers come in order: anything sent before is in)
         flushHist()                                              -- a new query: the previous one is complete
         scanId = scanId + 1; scanCount = 0
         record(C_AuctionHouse.GetBrowseResults())

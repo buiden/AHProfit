@@ -142,6 +142,7 @@ function P.fail(text)
     frame.state:SetText("")
 end
 function P.opened()                                              -- the auction house opened: an old reason goes away
+    if state == "scanning" or state == "paused" or state == "waiting" then return end   -- (opened again mid-scan)
     if frame and state == "failed" then frame:Hide() end
     state = nil
 end
@@ -155,6 +156,8 @@ function P.slash(arg)
         if arg == "off" and frame then frame:Hide() end
         if arg == "on" and (state == "scanning" or state == "paused" or state == "waiting") then   -- a scan is running
             show(); paint()
+            frame.title:SetText("AH Profit: scanning the auction house")
+            frame.bar:SetStatusBarColor(0.2, 0.7, 0.2)
             frame.state:SetText(state == "paused" and "paused while you sell" or state == "waiting" and "waiting for the server" or "")
         end
         ns.say("scan progress window " .. arg .. "." .. (arg == "off" and " Scan results still show in chat." or ""))
