@@ -2,7 +2,7 @@
 ## Title: AH Profit
 ## Notes: Shows the auction house price, the amount after the cut, and the profit over vendoring on every item tooltip.
 ## Author: Abdullah
-## Version: 0.6.0
+## Version: 0.6.1
 ## SavedVariables: AHProfitDB
 ## OptionalDeps: Auctionator
 ## IconTexture: Interface\Icons\INV_Misc_Coin_01
