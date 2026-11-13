@@ -234,10 +234,20 @@ local function nodeSeen(sender, map, h, x, y, t)
 end
 
 -- --------------------------------------------------------------------------------------------------- receiving --
-local R = {}
-local PENDING = 900                                              -- an unfinished transfer is forgotten after this
+local R, recvSaid = {}, {}
+local PENDING = 900                                              -- an unfinished transfer is forgotten 15 min after its last chunk
 busy = function() return next(R) ~= nil end
-local function expire(now)
+local armed = false
+local expire
+local function arm()                                             -- one timer, for the transfer that would expire first
+    if armed then return end
+    local soonest
+    for _, r in pairs(R) do local d = r.at + PENDING - ns.now(); if not soonest or d < soonest then soonest = d end end
+    if not soonest then return end
+    armed = true
+    C_Timer.After(math.max(0, soonest) + 5, function() armed = false; expire(ns.now()); arm() end)
+end
+expire = function(now)
     for k, r in pairs(R) do
         if now - r.at > PENDING then
             R[k] = nil
@@ -265,11 +275,15 @@ local function header(sender, ver, sid, t, n, chunks)
     expire(now)
     if t <= math.max(L.full, H.full) then return end            -- nothing newer than what is here
     held[H] = ns.pruneShared(H)                                  -- also drops entries older than 12 h
-    if not R[sender] or R[sender].t ~= t then
-        ns.say("receiving prices from " .. sender:match("^[^-]+") .. "'s scan (about " .. n .. " items)...")
+    local name = sender:match("^[^-]+")
+    if (not R[sender] or R[sender].t ~= t) and now - (recvSaid[name] or -1e9) >= ASKGAP then   -- once per sender per 10 min
+        local c = 0
+        for k, at in pairs(recvSaid) do if now - at >= ASKGAP then recvSaid[k] = nil else c = c + 1 end end
+        if c < 50 then recvSaid[name] = now end
+        ns.say("receiving prices from " .. name .. "'s scan (about " .. n .. " items)...")
     end
     R[sender] = { sid = sid, t = t, n = n, chunks = chunks, got = {}, count = 0, items = 0, seen = {}, at = now, stage = {}, stored = 0 }
-    C_Timer.After(PENDING + 5, function() expire(ns.now()) end)  -- also when nobody sends anything more
+    arm()                                                        -- also when nobody sends anything more
 end
 local function chunk(sender, sid, seq, payload)
     expire(ns.now())
@@ -277,7 +291,7 @@ local function chunk(sender, sid, seq, payload)
     if not r or r.sid ~= sid or not whole(seq, r.chunks) or seq < 1 or r.got[seq] then return end
     local list = Y.decode(payload)
     if not list or r.items + #list / 3 > r.n then R[sender] = nil; return end
-    r.got[seq] = true; r.count = r.count + 1
+    r.got[seq] = true; r.count = r.count + 1; r.at = ns.now()    -- still coming: a long transfer is not cut
     local H, t, seen = ns.shared(), r.t, r.seen
     local n = held[H] or 0
     local name = sender:match("^[^-]+")
@@ -342,7 +356,7 @@ end
 -- (equal times: the lowest name, so every asker picks the same owner) -> only that owner broadcasts. 0.6.0 owners
 -- ignore A, O and P, so they are not picked until they update; their own Q asks are still answered above.
 local OFFERWAIT, COLLECT, RESEND = 3, 5, 600
-local round, heard, lastOffer, askedAt = nil, {}, nil, {}
+local round, heard, lastOffer, askedAt, lastQ = nil, {}, nil, {}, -1e9
 local sentT, sentAt = nil, -1e9                                  -- the last scan broadcast, and when it began
 local function ownCount(L)
     local n = 0
@@ -371,7 +385,7 @@ local function offerSeen(name, t, n, wait)
     local now = ns.now()
     if not (whole(t, now + AHEAD) and t >= now - BEHIND and whole(n, 1e7) and n > 0) then return end
     wait = math.min(whole(wait, 1e6) and wait or 0, 600)
-    heard[name] = { t = t, n = n, at = now }
+    heard[name] = { t = t, n = n, at = now, wait = wait }
     local count, oldest = 0, nil
     for k, v in pairs(heard) do count = count + 1; if not oldest or v.at < heard[oldest].at then oldest = k end end
     if count > 20 then heard[oldest] = nil end
@@ -399,7 +413,15 @@ local function finishRound(r)
     for name, t in pairs(r.offers) do
         if not isSkipped(name, t) and (not bt or t > bt or (t == bt and name < best)) then best, bt = name, t end
     end
-    if not (best and on() and inGuild()) then return end
+    if not best then
+        -- No offer at all: maybe only 0.6.0 members have newer prices. Ask once the old way (they answer Q), at
+        -- most once per 10 min.
+        if next(r.offers) == nil and on() and inGuild() and ns.now() - lastQ >= ASKGAP and send("Q" .. VER .. "," .. r.have) then
+            lastQ = ns.now()
+        end
+        return
+    end
+    if not (on() and inGuild()) then return end
     if not send("P" .. VER .. "," .. best .. "," .. bt) then return end
     local w = { owner = best, t = bt, retry = r.retry }
     watch = w
@@ -419,6 +441,14 @@ end
 function Y.sent(t) sentT, sentAt = t, ns.now() end
 startRound = function(have, retry)
     local r = { have = have, offers = {}, waits = {}, retry = retry }
+    -- Offers heard in the last 5 s count too: their owners do not offer again so soon, and askers a second or two
+    -- apart must pick the same owner.
+    local now = ns.now()
+    for name, v in pairs(heard) do
+        if now - v.at <= COLLECT and v.t > have and now - v.t < 43200 then
+            r.offers[name], r.waits[name] = v.t, math.max(0, (v.wait or 0) - math.floor(now - v.at))
+        end
+    end
     round = r
     C_Timer.After(COLLECT, function() finishRound(r) end)
 end
@@ -530,12 +560,16 @@ f:SetScript("OnEvent", function(_, ev, ...)
             end
         end
     end
-    if newest > 0 and on() and inGuild() then
+    -- Said once per cut transfer (DB.cutSaid, optional: the scan time last announced), and not at all when your own
+    -- complete scan is at least as new.
+    local DB = ns.db()
+    if newest > 0 and newest > ns.live().full and DB and DB.cutSaid ~= newest and on() and inGuild() then
+        DB.cutSaid = newest
         cut = { from = H.from[newest] or "a guild member", got = got }
         ns.say("the last price transfer from " .. cut.from .. " (" .. got .. " items) was cut by a reload; asking the guild again.")
         askAgain()                                               -- this is the login ask, 30 s in instead of 12
     else
-        C_Timer.After(12, Y.ask)
+        C_Timer.After(12, function() if not busy() and not out then Y.ask() end end)   -- a transfer already coming in
     end
     local first = HOUR - JITTER + math.random() * 2 * JITTER
     nextCheck = ns.now() + first
