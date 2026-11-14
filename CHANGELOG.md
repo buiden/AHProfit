@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.2
 - Waylaid Crates and Craftsman's Writs: hovering a Waylaid Crate lists every bundle it accepts (for example "20x Peacebloom") with the bundle's total at the lowest auction price, and marks the cheapest bundle in green; an unlisted item says "none listed". Hovering a Craftsman's Writ shows the item it asks for and that item's auction price. Covers all 30 crates and 150 writs in the game data (build 1.60.1.69913), in the new `WritData.lua`. Shown without Shift; nothing is saved.
 
 ## 0.6.1
