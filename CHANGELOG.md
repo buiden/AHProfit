@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.3
 - Bags-full advisor: "Don't show again until reload" dismisses and suppresses advice for this session only. Reloading or relogging restores it; ordinary Close is unchanged. No items are deleted or moved, and Blizzard confirmations are unaffected.
 
 ## 0.6.2
