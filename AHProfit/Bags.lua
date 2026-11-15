@@ -340,6 +340,7 @@ end
 -- A small movable frame: icon, the advice, Show (opens the bags and marks the slot), Keep, and close. Plain
 -- frames only; nothing secure, nothing that acts on items.
 local alert, current
+local suppressed = false -- this Lua session only; reload/relog restores advice
 -- Marks the slot when its bag is open: the open bag frames' item buttons (pooled, unnamed on this client) are
 -- found through EnumerateValidItems, and a frame of our own is laid over the button. The bags are never opened
 -- from here (that could taint the game's buttons), and nothing of the game's is changed.
@@ -394,7 +395,7 @@ B.reads = 0
 local function build()
     if alert then return alert end
     local f = CreateFrame("Frame", "AHProfitBagAlert", UIParent)
-    f:SetSize(360, 96); f:SetFrameStrata("DIALOG"); f:SetClampedToScreen(true)
+    f:SetSize(360, 124); f:SetFrameStrata("DIALOG"); f:SetClampedToScreen(true)
     f:SetMovable(true); f:EnableMouse(true); f:RegisterForDrag("LeftButton")
     f:SetScript("OnDragStart", f.StartMoving)
     f:SetScript("OnDragStop", function(self)
@@ -407,7 +408,7 @@ local function build()
     f.text = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"); f.text:SetPoint("TOPLEFT", 48, -8); f.text:SetWidth(300); f.text:SetJustifyH("LEFT")
     local function button(label, x, fn)
         local b = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-        b:SetSize(70, 20); b:SetPoint("BOTTOMLEFT", x, 8); b:SetText(label); b:SetScript("OnClick", fn)
+        b:SetSize(70, 20); b:SetPoint("BOTTOMLEFT", x, 36); b:SetText(label); b:SetScript("OnClick", fn)
         return b
     end
     f.show = button("Show", 48, function()
@@ -421,6 +422,13 @@ local function build()
         else say("the keep list is full (" .. KEEP_MAX .. "); /ahp unkeep an item first.") end
     end)
     f.close = button("Close", 200, function() f:Hide() end)
+    f.suppress = button("Don't show again until reload", 48, function()
+        suppressed = true
+        if f.mark then f.mark:Hide() end
+        f:Hide()
+    end)
+    f.suppress:SetSize(264, 20)
+    f.suppress:ClearAllPoints(); f.suppress:SetPoint("BOTTOMLEFT", 48, 8)
     local D = db()
     local pos = D and type(D.bagAlertPos) == "table" and D.bagAlertPos
     local placed = pos and str(pos[1]) and str(pos[2]) and num(pos[3]) and num(pos[4])
@@ -432,6 +440,7 @@ local function build()
 end
 function B.frame() return alert end                              -- for tests
 function B.show(adv, loot)
+    if suppressed then return end
     local L = B.text(adv, loot)
     if not L then if alert then alert:Hide() end return end
     local f = build()
@@ -466,6 +475,7 @@ local lastErrAt = -1e9
 -- Shows the advice when it is due. err: an "inventory is full" error just happened. force: show again (Keep, or
 -- the shown slot changed).
 function B.check(err, force)
+    if suppressed then return end
     local th = threshold()
     if th < 0 then alerted = false; return end
     if err and not force then                                    -- a burst of errors (spam-looting): one scan
