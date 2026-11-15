@@ -50,14 +50,14 @@ id1 = f[1]; local seedPrice = f[2]
 items[id1] = { 500, 0, 1 }
 AHProfitDB.live["TestRealm|Alliance"] = { p = { [id1] = 600 }, q = { [id1] = 3 }, t = { [id1] = S.time }, full = 0 }
 local l = tip(id1)
-ok("exactly three lines, in order: vendor, AH, profit", #l == 3 and l[1] == "Vendor price => 5s 0c" and l[2] == "AH price (each)  scan just now, 3 listed => 6s 0c" and l[3] == "AH profit  after 5% cut => +70c", table.concat(l, " / "))
+ok("exactly three lines, in order: vendor, AH, profit", #l == 3 and l[1] == "Vendor price (each) => 5s 0c" and l[2] == "AH price (each)  scan just now, 3 listed => 6s 0c" and l[3] == "AH profit  after 5% cut => +70c", table.concat(l, " / "))
 local colors = {}
 ns.addLines({ AddDoubleLine = function(_, _, _, r, g, b) colors[#colors + 1] = { r, g, b } end }, id1)
 ok("a gain is green", colors[3][2] == 1 and colors[3][1] < 1)
 AHProfitDB.cut = 15; l = tip(id1)
 ok("15% cut still beats vendor by 10c", l[3] == "AH profit  after 15% cut => +10c" and #l == 3, table.concat(l, " / ")); AHProfitDB.cut = 5
 items[id1] = { 580, 0, 1 }; l = tip(id1)
-ok("vendor pays more: a minus", l[1] == "Vendor price => 5s 80c" and l[3] == "AH profit  after 5% cut => -10c" and #l == 3, table.concat(l, " / "))
+ok("vendor pays more: a minus", l[1] == "Vendor price (each) => 5s 80c" and l[3] == "AH profit  after 5% cut => -10c" and #l == 3, table.concat(l, " / "))
 colors = {}; ns.addLines({ AddDoubleLine = function(_, _, _, r, g, b) colors[#colors + 1] = { r, g, b } end }, id1)
 ok("a loss is red", colors[3][1] == 1 and colors[3][2] < 1); items[id1] = { 500, 0, 1 }
 S.count[id1] = 20; l = tip(id1); ok("no extra lines without Shift", #l == 3, table.concat(l, " / "))
@@ -74,10 +74,10 @@ AHProfitDB.live["TestRealm|Alliance"].t[id1] = ns.seed.t - 7300
 -- binding / unknown / uncached / no vendor value
 items[900001] = { 100, 1, 2 }; ok("bind on pickup hidden", #tip(900001) == 0)
 items[900002] = { 100, 4, 1 }; ok("quest item hidden", #tip(900002) == 0)
-items[900003] = { 250, 0, 1 }; l = tip(900003); ok("unknown price shows vendor without a profit claim", #l == 2 and l[1] == "Vendor price => 2s 50c" and l[2] == "AH price (each) => unknown", table.concat(l, " / "))
+items[900003] = { 250, 0, 1 }; l = tip(900003); ok("unknown price shows vendor without a profit claim", #l == 2 and l[1] == "Vendor price (each) => 2s 50c" and l[2] == "AH price (each) => unknown", table.concat(l, " / "))
 items[900004] = { 0, 0, 1 }; ok("unlisted, no vendor: nothing", #tip(900004) == 0)
 local id2 = f[4]; l = tip(id2); ok("uncached item: price only, no profit claim", #l == 1 and has(l, "AH price (each)") and not has(l, "profit"), table.concat(l, " / "))
-items[id2] = { 0, 0, 1 }; l = tip(id2); ok("no vendor value: profit is the whole amount after the cut", #l == 3 and l[1] == "Vendor price => none" and has(l, "AH profit  after 5% cut => +"), table.concat(l, " / "))
+items[id2] = { 0, 0, 1 }; l = tip(id2); ok("no vendor value: profit is the whole amount after the cut", #l == 3 and l[1] == "Vendor price (each) => none" and has(l, "AH profit  after 5% cut => +"), table.concat(l, " / "))
 ok("non-number id ignored", pcall(tipcb, { AddDoubleLine = function() error("x") end }, { id = "a" }))
 ok("nil data ignored", pcall(tipcb, {}, nil))
 S.faction = "Horde"; ok("other faction never sees Alliance feed", #tip(id2) == 0); S.faction = "Alliance"
@@ -592,7 +592,17 @@ do
         SetScript = function() hooks = hooks + 1 end,
         GetItem = function() return "n", "item:" .. id end,
     }
-    local tt = setmetatable({}, { __index = methods, __newindex = function() writes = writes + 1 end })
+    -- Money-frame access (the game's own Sell Price line) is counted, never expected.
+    local moneyKeys = { SetMoney = true, AddMoney = true, ClearMoney = true, shownMoneyFrames = true,
+        hasMoney = true, numMoneyFrames = true }
+    local moneyTouch = 0
+    local tt = setmetatable({}, {
+        __index = function(_, k) if moneyKeys[k] then moneyTouch = moneyTouch + 1 end return methods[k] end,
+        __newindex = function() writes = writes + 1 end })
+    local oldClearMoney, oldSetTooltipMoney, oldAddMoney = GameTooltip_ClearMoney, SetTooltipMoney, GameTooltip_OnTooltipAddMoney
+    GameTooltip_ClearMoney = function() moneyTouch = moneyTouch + 1 end
+    SetTooltipMoney = function() moneyTouch = moneyTouch + 1 end
+    GameTooltip_OnTooltipAddMoney = function() moneyTouch = moneyTouch + 1 end
     GameTooltip, ItemRefTooltip = tt, tt
     local postCall = TooltipDataProcessor.AddTooltipPostCall
     hooksecurefunc = function(owner, method)
@@ -647,7 +657,7 @@ do
     H.p[id], H.q[id], H.t[id], H.from[gt] = 338, 40, gt, "Example Scout"
     local text = hover()
     check("guild 338 beats fallback 353; vendor 60 gives profit 261", #text == 3
-        and text[1] == "Vendor price => 60c"
+        and text[1] == "Vendor price (each) => 60c"
         and text[2] == label .. "  guild (Example Scout, 59m ago), 40 listed => 3s 38c"
         and text[3] == "AH profit  after 5% cut => +2s 61c" and apiCalls == 0, text)
     check("owned line colors and grey provenance are unchanged", colorsAt(1, {1, 1, 1, 1, 1, 1})
@@ -676,6 +686,13 @@ do
         end
     end
     ns.tools, ns.extra = nil, nil
+    for _, n in ipairs({ 1, 11, 20 }) do
+        text = hover(n)
+        check("per-item vendor stays 60c for hovered stack " .. n, #text == 3
+            and text[1] == "Vendor price (each) => 60c"
+            and text[2] == label .. "  guild (Example Scout, 59m ago), 40 listed => 3s 38c"
+            and text[3] == "AH profit  after 5% cut => +2s 61c", text)
+    end
     L.p[id], L.q[id], L.t[id] = 300, 8, S.time - 7200
     text = hover()
     check("own at exactly two hours beats newer guild and feed", text[2] == label .. "  scan 2h ago, 8 listed => 3s 0c"
@@ -685,7 +702,7 @@ do
     check("outside fresh-own window the newer guild still wins", text[2] == label .. "  guild (Example Scout, 59m ago), 40 listed => 3s 38c", text)
     text = hover(20, false, true)
     check("pre-existing foreign line is neither removed nor repositioned", #text == 4 and text[1] == "Other addon => untouched"
-        and colorsAt(1, {.1, .2, .3, .4, .5, .6}) and text[2] == "Vendor price => 60c"
+        and colorsAt(1, {.1, .2, .3, .4, .5, .6}) and text[2] == "Vendor price (each) => 60c"
         and text[3] == label .. "  guild (Example Scout, 59m ago), 40 listed => 3s 38c", text)
     boot(nil, true); text = hover()
     check("absent Auctionator keeps feed provenance age and quantity", #text == 3
@@ -701,7 +718,7 @@ do
         and preference.auction_tooltips == false, text)
     boot(nil, false)
     text = hover()
-    check("unknown has no numeric price or profit", #text == 2 and text[1] == "Vendor price => 60c"
+    check("unknown has no numeric price or profit", #text == 2 and text[1] == "Vendor price (each) => 60c"
         and text[2] == label .. " => unknown" and colorsAt(2, {1, 1, 1, .6, .6, .6}), text)
     Auctionator = provider; text = hover()
     check("late API availability works without reloading AHProfit", text[2] == label .. "  Auctionator, today => 3s 53c", text)
@@ -724,7 +741,7 @@ do
         end
         items[id] = {0, 0, 1}; text = hover()
         check("zero vendor, known price " .. tostring(known), known
-            and #text == 3 and text[1] == "Vendor price => none" and text[3] == "AH profit  after 5% cut => +3s 21c"
+            and #text == 3 and text[1] == "Vendor price (each) => none" and text[3] == "AH profit  after 5% cut => +3s 21c"
             or not known and #text == 0, text)
         items[id] = nil; text = hover()
         check("uncached vendor, known price " .. tostring(known), known
@@ -743,6 +760,8 @@ do
         and tt.AddDoubleLine == methods.AddDoubleLine and tt.ClearLines == methods.ClearLines and tt.SetText == methods.SetText
         and TooltipDataProcessor.AddTooltipPostCall == postCall and provider.Tooltip.AddAuctionTip == foreignTip
         and provider.Config.Set == foreignSet)
+    check("no read or write of the tooltip money frame or game Sell Price helpers", moneyTouch == 0)
+    GameTooltip_ClearMoney, SetTooltipMoney, GameTooltip_OnTooltipAddMoney = oldClearMoney, oldSetTooltipMoney, oldAddMoney
     S.time, time, IsShiftKeyDown, C_Container = oldTime, oldClock, oldShift, oldContainer
     GameTooltip, ItemRefTooltip, hooksecurefunc, Auctionator = oldGameTip, oldRefTip, oldHook, nil
 end

@@ -3,12 +3,12 @@
 A World of Warcraft: Forever addon that shows item tooltip estimates: what a vendor pays, the selected cached auction house price per item, and what you gain or lose by selling on the auction house instead.
 
 ```
-Vendor price                                      5s 0c
+Vendor price (each)                               5s 0c
 AH price (each)  scan 2m ago, 3 listed        6s 0c
 AH profit  after 5% cut                             +70c
 ```
 
-`AH price (each)` means AH Profit's **selected cached estimate per item**, not the globally newest timestamp, a live quote, or a guaranteed sale price. Its source, age and known listed quantity stay on the same line. The main price and profit stay per item regardless of the hovered stack size or Shift. When no price is known, an eligible item with a vendor value shows `unknown`, without a numeric profit; excluded items remain hidden.
+`Vendor price (each)` is what a vendor pays for one item. The game's own Sell Price line can show the value for the whole hovered stack, so the two can differ; AH Profit leaves that line alone. `AH price (each)` means AH Profit's **selected cached estimate per item**, not the globally newest timestamp, a live quote, or a guaranteed sale price. Its source, age and known listed quantity stay on the same line. The main price and profit stay per item regardless of the hovered stack size or Shift. When no price is known, an eligible item with a vendor value shows `unknown`, without a numeric profit; excluded items remain hidden.
 
 The profit line is green with a `+` when the auction house pays more than the vendor after the cut, and red with a `-` when the vendor pays more. Hold Shift for more: `Your N on the AH, after cut` uses the total owned count returned by the game, not necessarily the hovered stack, and multiplies the rounded per-item net value by N. The measured deposit and your own sold/expired record remain Shift extras.
 
@@ -28,13 +28,13 @@ feed). Auctionator is not asked for an item missing from a complete scan of your
 Auctionator's day began. It is read through Auctionator's public API only; its listed count is not known, so none is shown.
 Auctionator fixes its day when it loads, so after midnight its new scans are not used until you `/reload`. Its source label is `Auctionator, today`, not a minute-precise timestamp.
 
-### Optional: hide Auctionator's separate auction tooltip line
+### Optional: hide Auctionator's separate price rows
 
-AH Profit cannot hide another addon's output. Renaming its own line does **not** remove Auctionator's separate `Auction` line, move AH Profit into that row, or change Auctionator's configuration.
+AH Profit cannot hide another addon's output. Relabelling its own lines does **not** remove Auctionator's separate `Auction` or `Vendor` rows, move AH Profit into those rows, or change Auctionator's configuration.
 
-If you choose to hide that competing line, open **Auctionator options → Tooltips** and uncheck only the auction-price checkbox (wording depends on your locale). Check the active profile first: this is a persistent preference for the character when per-character settings are active, otherwise it is account-wide. The same option also gates Auctionator's pet and reagent auction tooltip features, not just one item. Leave vendor, disenchant, mean, age, Shift-stack, scanning, shopping and data settings unchanged. Mean and age have separate controls, so this is not a promise to remove every auction-related line.
+Keep Auctionator enabled: its scanning, history and AH Profit's optional price fallback depend on it. Its `Auction` and `Vendor` tooltip rows are two separate checkboxes under **Auctionator options → Tooltips** (wording depends on your locale); you may turn off either or both yourself. Hiding its Vendor row removes the second vendor value, since AH Profit already shows one; on some clients Auctionator's vendor row also replaces the game's Sell Price line, so that line may reappear. Check this in game. Check the active profile first: each checkbox is a persistent preference for the character when per-character settings are active, otherwise it is account-wide. The Auction checkbox also gates Auctionator's pet and reagent auction tooltip features, not just one item. Other Auctionator settings (disenchant, mean, age, Shift-stack, scanning, shopping, data) are not involved. Mean and age have separate controls, so this is not a promise to remove every auction-related line.
 
-To undo it, re-enable the same checkbox in the same profile; Auctionator's line returns. AH Profit never sets or restores that preference, including when disabled or unloaded. Hiding Auctionator's tooltip line does not disable AH Profit's optional public-API price fallback; `/ahp auctionator on|off` controls that fallback separately. The combined display still needs an in-game check of tooltip callback order and other addons.
+To undo it, re-enable the same checkbox in the same profile; Auctionator's row returns. AH Profit never sets or restores that preference, including when disabled or unloaded. Hiding Auctionator's tooltip rows does not disable AH Profit's optional public-API price fallback; `/ahp auctionator on|off` controls that fallback separately. The combined display still needs an in-game check of tooltip callback order and other addons.
 
 ## Other features
 
