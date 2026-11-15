@@ -349,6 +349,43 @@ ok("robust: no container API, no advice, no error", select(2, pcall(B.advise, ni
 local savedI = C_Item; C_Item = nil
 ok("robust: no item API, no error", pcall(B.advise, nil)); C_Item = savedI
 
+-- ---- dismiss this advisor until the Lua session ends; no saved setting or item action
+setup({ [0] = bag(2, 0, { { 2770, 1 }, { 4306, 20 } }) })
+W.loot = {}; W.clock = 100
+fire("BAG_UPDATE_DELAYED")
+local af = B.frame()
+ok("session dismiss: advisor initially visible", af and af:IsShown())
+af.close.scripts.OnClick()
+W.clock = 101; fire("UI_ERROR_MESSAGE", 3, ERR_INV_FULL)
+ok("ordinary close: later full error still shows advice", af:IsShown())
+local savedBefore = {}; for k, v in pairs(AHProfitDB) do savedBefore[k] = v end
+local itemActions = 0
+local function itemAction() itemActions = itemActions + 1 end
+DeleteCursorItem = itemAction; PickupContainerItem = itemAction
+C_Container.PickupContainerItem = itemAction
+local suppress = af.suppress
+ok("session dismiss: labelled control exists", suppress and suppress:GetText() == "Don't show again until reload")
+if suppress then suppress.scripts.OnClick() end
+ok("session dismiss: hides immediately", not af:IsShown())
+for i = 1, 3 do
+    W.clock = W.clock + 1; fire("UI_ERROR_MESSAGE", 3, ERR_INV_FULL)
+    W.bags[0].slots[1] = nil; fire("BAG_UPDATE_DELAYED")
+    W.bags[0].slots[1] = { 2770, 1 }; fire("BAG_UPDATE_DELAYED")
+    W.loot = { { 9999, 1 } }; fire("LOOT_OPENED"); fire("UI_ERROR_MESSAGE", 3, ERR_INV_FULL); fire("LOOT_CLOSED")
+    B.check(true, true); B.show(B.advise(nil))
+    ok("session dismiss: all repeat paths suppressed " .. i, not af:IsShown())
+end
+ok("session dismiss: no deletion or pickup", itemActions == 0)
+ok("session dismiss: inventory unchanged", W.bags[0].slots[1][1] == 2770 and W.bags[0].slots[1][2] == 1 and W.bags[0].slots[2][1] == 4306)
+local sameSave = true
+for k, v in pairs(AHProfitDB) do if savedBefore[k] ~= v then sameSave = false end end
+for k, v in pairs(savedBefore) do if AHProfitDB[k] ~= v then sameSave = false end end
+ok("session dismiss: no saved fields changed", sameSave)
+local oldSave = AHProfitDB
+boot(oldSave); B = ns.bags; fire("BAG_UPDATE_DELAYED")
+ok("session dismiss: fresh Lua session with same save shows normally", B.frame() and B.frame():IsShown())
+DeleteCursorItem = nil; PickupContainerItem = nil; C_Container.PickupContainerItem = nil
+
 -- ---- advice only: nothing in the addon acts on items
 local src = ""
 for _, f in ipairs({ "Bags.lua", "Core.lua", "Tools.lua", "Extra.lua", "UI.lua", "Sync.lua", "Farm.lua" }) do src = src .. assert(io.open("AHProfit/" .. f)):read("*a") end
