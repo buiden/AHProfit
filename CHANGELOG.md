@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- Tooltip: label the selected cached per-item estimate `Latest AH price (each)` and an unavailable price `unknown`; price selection, profit, provenance, line order and Shift extras are unchanged. Document the optional, reversible Auctionator tooltip preference without changing another addon's settings.
+
 ## 0.6.3
 - Bags-full advisor: "Don't show again until reload" dismisses and suppresses advice for this session only. Reloading or relogging restores it; ordinary Close is unchanged. No items are deleted or moved, and Blizzard confirmations are unaffected.
 
