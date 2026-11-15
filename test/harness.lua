@@ -50,7 +50,7 @@ id1 = f[1]; local seedPrice = f[2]
 items[id1] = { 500, 0, 1 }
 AHProfitDB.live["TestRealm|Alliance"] = { p = { [id1] = 600 }, q = { [id1] = 3 }, t = { [id1] = S.time }, full = 0 }
 local l = tip(id1)
-ok("exactly three lines, in order: vendor, AH, profit", #l == 3 and l[1] == "Vendor price => 5s 0c" and l[2] == "Latest AH price (each)  scan just now, 3 listed => 6s 0c" and l[3] == "AH profit  after 5% cut => +70c", table.concat(l, " / "))
+ok("exactly three lines, in order: vendor, AH, profit", #l == 3 and l[1] == "Vendor price => 5s 0c" and l[2] == "AH price (each)  scan just now, 3 listed => 6s 0c" and l[3] == "AH profit  after 5% cut => +70c", table.concat(l, " / "))
 local colors = {}
 ns.addLines({ AddDoubleLine = function(_, _, _, r, g, b) colors[#colors + 1] = { r, g, b } end }, id1)
 ok("a gain is green", colors[3][2] == 1 and colors[3][1] < 1)
@@ -67,16 +67,16 @@ IsShiftKeyDown = nil
 
 -- feed fallback, newer feed beats older scan (one over 2 hours old: a scan under 2 hours wins whatever the feed)
 AHProfitDB.live["TestRealm|Alliance"].t[id1] = ns.seed.t - 7300
-l = tip(id1); ok("newer feed beats older scan", has(l, "Latest AH price (each)  feed 10m ago"), table.concat(l, " / "))
+l = tip(id1); ok("newer feed beats older scan", has(l, "AH price (each)  feed 10m ago"), table.concat(l, " / "))
 AHProfitDB.live["TestRealm|Alliance"].t[id1] = ns.seed.t - 10
-l = tip(id1); ok("a scan under 2 hours old beats a newer feed", has(l, "Latest AH price (each)  scan 10m ago"), table.concat(l, " / "))
+l = tip(id1); ok("a scan under 2 hours old beats a newer feed", has(l, "AH price (each)  scan 10m ago"), table.concat(l, " / "))
 AHProfitDB.live["TestRealm|Alliance"].t[id1] = ns.seed.t - 7300
 -- binding / unknown / uncached / no vendor value
 items[900001] = { 100, 1, 2 }; ok("bind on pickup hidden", #tip(900001) == 0)
 items[900002] = { 100, 4, 1 }; ok("quest item hidden", #tip(900002) == 0)
-items[900003] = { 250, 0, 1 }; l = tip(900003); ok("unknown price shows vendor without a profit claim", #l == 2 and l[1] == "Vendor price => 2s 50c" and l[2] == "Latest AH price (each) => unknown", table.concat(l, " / "))
+items[900003] = { 250, 0, 1 }; l = tip(900003); ok("unknown price shows vendor without a profit claim", #l == 2 and l[1] == "Vendor price => 2s 50c" and l[2] == "AH price (each) => unknown", table.concat(l, " / "))
 items[900004] = { 0, 0, 1 }; ok("unlisted, no vendor: nothing", #tip(900004) == 0)
-local id2 = f[4]; l = tip(id2); ok("uncached item: price only, no profit claim", #l == 1 and has(l, "Latest AH price (each)") and not has(l, "profit"), table.concat(l, " / "))
+local id2 = f[4]; l = tip(id2); ok("uncached item: price only, no profit claim", #l == 1 and has(l, "AH price (each)") and not has(l, "profit"), table.concat(l, " / "))
 items[id2] = { 0, 0, 1 }; l = tip(id2); ok("no vendor value: profit is the whole amount after the cut", #l == 3 and l[1] == "Vendor price => none" and has(l, "AH profit  after 5% cut => +"), table.concat(l, " / "))
 ok("non-number id ignored", pcall(tipcb, { AddDoubleLine = function() error("x") end }, { id = "a" }))
 ok("nil data ignored", pcall(tipcb, {}, nil))
@@ -101,7 +101,7 @@ ok("scan complete", L.full == S.time and chat[#chat]:find("300 items priced"), c
 ok("dup keeps lowest and sums", L.p[1001] == 50 and L.q[1001] == 7)
 ok("zero price not stored", L.p[1002] == 102)
 ok("stale item pruned by full scan", L.p[id1] == nil)
-items[id1] = { 500, 0, 1 }; l = tip(id1); ok("full scan overrides older feed", has(l, "Latest AH price (each) => unknown"), table.concat(l, " / "))
+items[id1] = { 500, 0, 1 }; l = tip(id1); ok("full scan overrides older feed", has(l, "AH price (each) => unknown"), table.concat(l, " / "))
 -- a narrow manual search must not wipe anything
 S.pages = { { R(1005, 1, 1) } }; fire("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
 ok("narrow search keeps the rest", L.p[1300] == 400 and L.p[1005] == 1)
@@ -581,7 +581,7 @@ end
 do
     local oldTime, oldClock, oldShift, oldContainer = S.time, time, IsShiftKeyDown, C_Container
     local oldGameTip, oldRefTip, oldHook = GameTooltip, ItemRefTooltip, hooksecurefunc
-    local id, label = 910001, "Latest AH price (each)"
+    local id, label = 910001, "AH price (each)"
     local rows, stack, shift = {}, 1, false
     local writes, clears, sets, hooks, configSets, apiCalls = 0, 0, 0, 0, 0, 0
     local methods = {

@@ -4,11 +4,11 @@ A World of Warcraft: Forever addon that shows item tooltip estimates: what a ven
 
 ```
 Vendor price                                      5s 0c
-Latest AH price (each)  scan 2m ago, 3 listed        6s 0c
+AH price (each)  scan 2m ago, 3 listed        6s 0c
 AH profit  after 5% cut                             +70c
 ```
 
-`Latest AH price (each)` means AH Profit's **selected cached estimate per item**, not the globally newest timestamp, a live quote, or a guaranteed sale price. Its source, age and known listed quantity stay on the same line. The main price and profit stay per item regardless of the hovered stack size or Shift. When no price is known, an eligible item with a vendor value shows `unknown`, without a numeric profit; excluded items remain hidden.
+`AH price (each)` means AH Profit's **selected cached estimate per item**, not the globally newest timestamp, a live quote, or a guaranteed sale price. Its source, age and known listed quantity stay on the same line. The main price and profit stay per item regardless of the hovered stack size or Shift. When no price is known, an eligible item with a vendor value shows `unknown`, without a numeric profit; excluded items remain hidden.
 
 The profit line is green with a `+` when the auction house pays more than the vendor after the cut, and red with a `-` when the vendor pays more. Hold Shift for more: `Your N on the AH, after cut` uses the total owned count returned by the game, not necessarily the hovered stack, and multiplies the rounded per-item net value by N. The measured deposit and your own sold/expired record remain Shift extras.
 
