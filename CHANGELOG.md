@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.5
 - Bags-full advisor: never suggest Cozy Sleeping Bag, even without item-spell lookup, or other non-grey items whose Use effect is reported by the client. Prefer `C_Item.GetItemSpell`, falling back to `GetItemSpell` when unavailable; missing or failed lookups leave existing protections unchanged. Recipes and grey items stay eligible; an empty lookup result does not count as a Use effect. Advice only: nothing is deleted, moved or used.
 
 ## 0.6.4
