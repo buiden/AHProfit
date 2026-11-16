@@ -17,6 +17,7 @@ B.KEEP_MAX = KEEP_MAX
 -- player's own class needs them, but any of them in the bags is there on purpose).
 local TOOLS = {
     [6948] = true,                                               -- Hearthstone
+    [211527] = true,                                             -- Cozy Sleeping Bag (reusable rested-XP item)
     [2901] = true, [7005] = true, [5956] = true, [9149] = true, [4471] = true, [6219] = true, [10498] = true, -- pick, knife, hammer, philosopher's stone, flint, spanner, micro-adjustor
     [6256] = true, [6365] = true, [6366] = true, [6367] = true, [12225] = true, [19022] = true, [19970] = true, -- fishing poles
     [6218] = true, [6339] = true, [11130] = true, [11145] = true, [16207] = true, -- runed enchanting rods
@@ -148,6 +149,12 @@ local function protected(s, reagents, sets, keep)
     if quality == 0 then return nil end                          -- grey: always allowed
     if classID == 0 then return "food, drink or a potion" end
     if s.bound and not (num(vendor) and vendor > 0) then return "bound, no vendor price" end
+    -- Reusable Use items (not recipes: a recipe's Use only teaches it, and a cheap one is fair to offer).
+    local getItemSpell = classID ~= 9 and ((C_Item and C_Item.GetItemSpell) or GetItemSpell)
+    if getItemSpell then
+        local ok, spellName, spellID = pcall(getItemSpell, s.id)
+        if ok and ((str(spellName) and spellName ~= "") or (num(spellID) and spellID > 0)) then return "has a use effect" end
+    end
     return nil
 end
 B.protected = function(s) return protected(s, classReagents(), setSlots(), keepList()) end
@@ -314,7 +321,7 @@ function B.text(adv, loot)
     if adv.kind == "merge" then
         return { "Merge " .. nameOf(adv.id, adv.link) .. " (frees " .. adv.frees .. " slot" .. (adv.frees > 1 and "s" or "") .. ")" }
     elseif adv.kind == "none" then
-        return { "Bags full; nothing in them may be suggested (quest items, tools, food, your keep list)." }
+        return { "Bags full; nothing in them may be suggested (quest items, tools, food, non-grey Use items, your keep list)." }
     end
     local s = adv.slot
     local why = adv.grey and "grey" or adv.unknown and "value unknown" or (adv.how == "ah" and "cheapest at the auction house" or "cheapest at a vendor")
