@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.4
 - Tooltip: label the owned vendor line `Vendor price (each)` (per item, unlike the game's stack Sell Price line) and the selected cached per-item estimate `AH price (each)` and an unavailable price `unknown`; price selection, profit, provenance, line order and Shift extras are unchanged. Document the optional, reversible Auctionator tooltip preference without changing another addon's settings.
 
 ## 0.6.3
