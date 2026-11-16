@@ -1,30 +1,40 @@
 # AH Profit
 
-A World of Warcraft: Forever addon that shows, on every item tooltip, what a vendor pays, the lowest auction house price, and what you gain or lose by selling on the auction house instead.
+A World of Warcraft: Forever addon that shows item tooltip estimates: what a vendor pays, the selected cached auction house price per item, and what you gain or lose by selling on the auction house instead.
 
 ```
-Vendor price                      5s 0c
-AH price  scan 2m ago, 3 listed   6s 0c
-AH profit  after 5% cut           +70c
+Vendor price (each)                               5s 0c
+AH price (each)  scan 2m ago, 3 listed        6s 0c
+AH profit  after 5% cut                             +70c
 ```
 
-The profit line is green with a `+` when the auction house pays more than the vendor after the cut, and red with a `-` when the vendor pays more. Hold Shift for more: the value of your whole stack, the measured deposit, and your own sold/expired record for the item.
+`Vendor price (each)` is what a vendor pays for one item. The game's own Sell Price line can show the value for the whole hovered stack, so the two can differ; AH Profit leaves that line alone. `AH price (each)` means AH Profit's **selected cached estimate per item**, not the globally newest timestamp, a live quote, or a guaranteed sale price. Its source, age and known listed quantity stay on the same line. The main price and profit stay per item regardless of the hovered stack size or Shift. When no price is known, an eligible item with a vendor value shows `unknown`, without a numeric profit; excluded items remain hidden.
+
+The profit line is green with a `+` when the auction house pays more than the vendor after the cut, and red with a `-` when the vendor pays more. Hold Shift for more: `Your N on the AH, after cut` uses the total owned count returned by the game, not necessarily the hovered stack, and multiplies the rounded per-item net value by N. The measured deposit and your own sold/expired record remain Shift extras.
 
 ## Where prices come from
 
 - **Your own scan.** The addon scans the auction house when you open it (at most every 15 minutes), or when you type `/ahp scan`. The scan stands still while you are on a Sell tab or hold an item, so it does not get in the way of posting.
-- **Your guild.** When a guild member with the addon finishes a full scan, the prices reach everyone else in the guild who runs it, with no reload. They are kept apart from your own scans and never change or delete them; the tooltip says `guild (Name, 20m ago)`. Your own scan wins while it is under 2 hours old. If a transfer is cut (a `/reload`, a logout, or messages that never arrive), the addon says so and asks the guild again about 30 seconds later, and the missing scan arrives within about 10 minutes (a member sends the same scan at most once every 10 minutes, then once more for anyone who asked in between); it also asks about once an hour, so you still get a newer scan whose owner was offline when you logged in. Members who have a newer scan offer it, the newest offer is picked, and only that member sends, so one transfer serves everyone who asked (a picked member that sends nothing is skipped and the next one asked); nobody answers when you already have the newest scan. `/ahp` shows the offers heard and when the next check is due. Members still on 0.6.0 are not picked to send until they update.
+- **Your guild.** When a guild member with the addon finishes a full scan, the prices reach everyone else in the guild who runs it, with no reload. They are kept apart from your own scans and never change or delete them; the tooltip says `guild (Name, 20m ago)`. Your own scan wins while it is at most 2 hours old. If a transfer is cut (a `/reload`, a logout, or messages that never arrive), the addon says so and asks the guild again about 30 seconds later, and the missing scan arrives within about 10 minutes (a member sends the same scan at most once every 10 minutes, then once more for anyone who asked in between); it also asks about once an hour, so you still get a newer scan whose owner was offline when you logged in. Members who have a newer scan offer it, the newest offer is picked, and only that member sends, so one transfer serves everyone who asked (a picked member that sends nothing is skipped and the next one asked); nobody answers when you already have the newest scan. `/ahp` shows the offers heard and when the next check is due. Members still on 0.6.0 are not picked to send until they update.
 - **The bundled snapshot.** `Data.lua` holds one snapshot of Blizzard's auction feed for the **EU PvP Alliance** house, taken when the release was built. It is used only for Alliance characters and only until a newer scan exists. On any other realm group it is wrong: scan once and it is replaced.
 
-Each tooltip says which source the price is from and how old it is.
+Source priority is unchanged: your own scan **at most 2 hours old** wins even over a newer guild or feed timestamp. Outside that rule and the optional Auctionator fallback below, a guild scan newer than your own wins, then your older own scan, then the bundled feed; a scan older than the feed loses to it. A complete scan at least as new as the feed prevents an omitted item from falling back to that feed.
 
-Treat guild-shared and bundled prices as estimates: only your own recent scan reflects your auction house right now.
+All prices, including your own scans, are cached observations. Read the displayed source and age; older known prices keep their actual age, not a new freshness claim.
 
 With [Auctionator](https://www.curseforge.com/wow/addons/auctionator) installed, a price it saw today is used when
 neither you nor the guild has scanned the item, or the newest such scan is more than 24 hours old (before the bundled
 feed). Auctionator is not asked for an item missing from a complete scan of yours or the guild's made since
 Auctionator's day began. It is read through Auctionator's public API only; its listed count is not known, so none is shown.
-Auctionator fixes its day when it loads, so after midnight its new scans are not used until you `/reload`.
+Auctionator fixes its day when it loads, so after midnight its new scans are not used until you `/reload`. Its source label is `Auctionator, today`, not a minute-precise timestamp.
+
+### Optional: hide Auctionator's separate price rows
+
+AH Profit cannot hide another addon's output. Relabelling its own lines does **not** remove Auctionator's separate `Auction` or `Vendor` rows, move AH Profit into those rows, or change Auctionator's configuration.
+
+Keep Auctionator enabled: its scanning, history and AH Profit's optional price fallback depend on it. Its `Auction` and `Vendor` tooltip rows are two separate checkboxes under **Auctionator options → Tooltips** (wording depends on your locale); you may turn off either or both yourself. Hiding its Vendor row removes the second vendor value, since AH Profit already shows one; on some clients Auctionator's vendor row also replaces the game's Sell Price line, so that line may reappear. Check this in game. Check the active profile first: each checkbox is a persistent preference for the character when per-character settings are active, otherwise it is account-wide. The Auction checkbox also gates Auctionator's pet and reagent auction tooltip features, not just one item. Other Auctionator settings (disenchant, mean, age, Shift-stack, scanning, shopping, data) are not involved. Mean and age have separate controls, so this is not a promise to remove every auction-related line.
+
+To undo it, re-enable the same checkbox in the same profile; Auctionator's row returns. AH Profit never sets or restores that preference, including when disabled or unloaded. Hiding Auctionator's tooltip rows does not disable AH Profit's optional public-API price fallback; `/ahp auctionator on|off` controls that fallback separately. The combined display still needs an in-game check of tooltip callback order and other addons.
 
 ## Other features
 

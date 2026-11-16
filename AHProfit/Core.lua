@@ -416,13 +416,13 @@ local function addLines(tt, id)
     local hasVendor = type(vendor) == "number" and vendor > 0
     if not price then
         if hasVendor and quality and quality >= 1 then
-            line(tt, "Vendor price", money(vendor), WHITE, WHITE)
-            line(tt, "AH price", "none listed", WHITE, GREY)
+            line(tt, "Vendor price (each)", money(vendor), WHITE, WHITE)
+            line(tt, "AH price (each)", "unknown", WHITE, GREY)
         end
         return
     end
-    if vendor ~= nil then line(tt, "Vendor price", hasVendor and money(vendor) or "none", WHITE, hasVendor and WHITE or GREY) end
-    line(tt, "AH price  |cff999999" .. srcLabel(src, t, from) .. (qty and qty > 0 and (", " .. qty .. " listed") or "") .. "|r", money(price), WHITE, WHITE)
+    if vendor ~= nil then line(tt, "Vendor price (each)", hasVendor and money(vendor) or "none", WHITE, hasVendor and WHITE or GREY) end
+    line(tt, "AH price (each)  |cff999999" .. srcLabel(src, t, from) .. (qty and qty > 0 and (", " .. qty .. " listed") or "") .. "|r", money(price), WHITE, WHITE)
     if vendor == nil then return end                             -- item not cached yet; the next hover has it
     local net = math.floor(price * (100 - DB.cut) / 100)
     local d = net - (hasVendor and vendor or 0)
