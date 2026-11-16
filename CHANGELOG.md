@@ -1,7 +1,7 @@
 # Changelog
 
 ## Unreleased
-- Bags-full advisor: never suggest Cozy Sleeping Bag, even without item-spell lookup, or other non-grey items whose Use effect is reported by the client. Prefer `C_Item.GetItemSpell`, falling back to `GetItemSpell` when unavailable; missing or failed lookups leave existing protections unchanged. Grey items stay eligible. Advice only: nothing is deleted, moved or used.
+- Bags-full advisor: never suggest Cozy Sleeping Bag, even without item-spell lookup, or other non-grey items whose Use effect is reported by the client. Prefer `C_Item.GetItemSpell`, falling back to `GetItemSpell` when unavailable; missing or failed lookups leave existing protections unchanged. Recipes and grey items stay eligible; an empty lookup result does not count as a Use effect. Advice only: nothing is deleted, moved or used.
 
 ## 0.6.4
 - Tooltip: label the owned vendor line `Vendor price (each)` (per item, unlike the game's stack Sell Price line) and the selected cached per-item estimate `AH price (each)` and an unavailable price `unknown`; price selection, profit, provenance, line order and Shift extras are unchanged. Document the optional, reversible Auctionator tooltip preference without changing another addon's settings.

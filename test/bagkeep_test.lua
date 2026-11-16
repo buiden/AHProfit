@@ -9,6 +9,7 @@ local IT = {
     [900001] = { "Reusable Use Item", 1, 1, 1, 15 }, -- synthetic, deliberately not a tool
     [900002] = { "Grey Use Item", 0, 1, 1, 15 },
     [9999] = { "Gem of Value", 3, 1, 5000, 15 },
+    [900003] = { "Cheap Recipe", 1, 1, 25, 9 },
 }
 local slots, saved = {}, {}
 function UnitClass() return "Warrior", "WARRIOR" end
@@ -129,6 +130,21 @@ local a = B.advise(nil)
 ok("use: full bag of protected items has no destroy suggestion", a and a.kind == "none", suggestion(a))
 local text = table.concat(B.text({ kind = "none" }), " / ")
 ok("text: nothing eligible mentions non-grey Use items", text:find("non-grey Use items", 1, true), text)
+
+-- Recipes stay eligible even though their Use teaches a spell; empty API results are not a Use effect.
+do
+    setup(900003)
+    C_Item.GetItemSpell = function(id) if id == 900003 then return "Learning", 483 end end
+    local a = B.advise(nil)
+    ok("recipe: cheap recipe with a Use spell is still suggested", a and a.kind == "destroy" and a.slot.id == 900003, suggestion(a))
+    for _, r in ipairs({ { "", 0 }, { "", nil }, { nil, 0 } }) do
+        setup(900001)
+        C_Item.GetItemSpell = function(id) if id == 900001 then return r[1], r[2] end end
+        local b = B.advise(nil)
+        ok("use: empty API result is not a Use effect (" .. tostring(r[1]) .. "," .. tostring(r[2]) .. ")",
+            b and b.kind == "destroy" and b.slot.id == 900001, suggestion(b))
+    end
+end
 
 print(pass .. " passed, " .. fail .. " failed")
 os.exit(fail == 0 and 0 or 1)

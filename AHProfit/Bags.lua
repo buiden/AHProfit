@@ -149,10 +149,11 @@ local function protected(s, reagents, sets, keep)
     if quality == 0 then return nil end                          -- grey: always allowed
     if classID == 0 then return "food, drink or a potion" end
     if s.bound and not (num(vendor) and vendor > 0) then return "bound, no vendor price" end
-    local getItemSpell = (C_Item and C_Item.GetItemSpell) or GetItemSpell
+    -- Reusable Use items (not recipes: a recipe's Use only teaches it, and a cheap one is fair to offer).
+    local getItemSpell = classID ~= 9 and ((C_Item and C_Item.GetItemSpell) or GetItemSpell)
     if getItemSpell then
         local ok, spellName, spellID = pcall(getItemSpell, s.id)
-        if ok and (str(spellName) or num(spellID)) then return "has a use effect" end
+        if ok and ((str(spellName) and spellName ~= "") or (num(spellID) and spellID > 0)) then return "has a use effect" end
     end
     return nil
 end
