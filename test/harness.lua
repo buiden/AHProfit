@@ -594,7 +594,7 @@ do
     }
     -- Money-frame access (the game's own Sell Price line) is counted, never expected.
     local moneyKeys = { SetMoney = true, AddMoney = true, ClearMoney = true, shownMoneyFrames = true,
-        hasMoney = true, numMoneyFrames = true }
+        hasMoney = true, numMoneyFrames = true, MoneyFrame = true }
     local moneyTouch = 0
     local tt = setmetatable({}, {
         __index = function(_, k) if moneyKeys[k] then moneyTouch = moneyTouch + 1 end return methods[k] end,
@@ -605,10 +605,23 @@ do
     GameTooltip_OnTooltipAddMoney = function() moneyTouch = moneyTouch + 1 end
     GameTooltip, ItemRefTooltip = tt, tt
     local postCall = TooltipDataProcessor.AddTooltipPostCall
+    -- Core registers exactly one tooltip callback and one browse post-hook per load; anything more is counted.
+    local boots, registrations, browseHooks = 0, 0, 0
+    TooltipDataProcessor.AddTooltipPostCall = function(t, fn) registrations = registrations + 1; return postCall(t, fn) end
     hooksecurefunc = function(owner, method)
-        -- Core's existing browse-query post-hook is allowed; tooltip hooks are not.
-        if owner ~= C_AuctionHouse or method ~= "SendBrowseQuery" then hooks = hooks + 1 end
+        if owner == C_AuctionHouse and method == "SendBrowseQuery" then browseHooks = browseHooks + 1
+        else hooks = hooks + 1 end
     end
+    -- Auctionator's saved settings: any write or replacement is counted, never expected.
+    local foreignWrites = 0
+    local oldAccount, oldCharacter = AUCTIONATOR_CONFIG, AUCTIONATOR_CHARACTER_CONFIG
+    -- Proxies keep their data in a backing table, so even rewriting an existing key reaches __newindex.
+    local function guarded(t)
+        return setmetatable({}, { __index = t, __newindex = function() foreignWrites = foreignWrites + 1 end })
+    end
+    local account = guarded({ auction_tooltips = false })
+    local character = guarded({})
+    AUCTIONATOR_CONFIG, AUCTIONATOR_CHARACTER_CONFIG = account, character
     IsShiftKeyDown = function() return shift end
     C_Container = { GetContainerItemInfo = function() return { itemID = id, stackCount = stack } end }
     S.time = 1800000000
@@ -616,7 +629,7 @@ do
     local foreignTip = function() end
     local foreignSet = function() configSets = configSets + 1 end
     local preference = { auction_tooltips = false }
-    local provider = {
+    local provider = guarded({
         API = { v1 = {
             GetAuctionAgeByItemID = function(caller, item)
                 assert(caller == "AHProfit" and item == id); apiCalls = apiCalls + 1; return 0
@@ -628,8 +641,11 @@ do
         Config = { Options = { AUCTION_TOOLTIPS = "auction_tooltips" },
             Get = function(option) return preference[option] end, Set = foreignSet },
         Tooltip = { AddAuctionTip = foreignTip },
-    }
+    })
+    rawget(getmetatable(provider), "__index").Config = guarded(provider.Config)
+    rawget(getmetatable(provider), "__index").Tooltip = guarded(provider.Tooltip)
     local function boot(auc, feed)
+        boots = boots + 1
         Auctionator, AHProfitDB, ns = auc, {}, {}
         if feed then ns.seed = { t = S.time - 3600, faction = "Alliance", flat = { id, 410, 70 } } end
         load("Core.lua"); fire("ADDON_LOADED", "AHProfit"); timers = {}
@@ -758,9 +774,16 @@ do
         and clears == 0 and sets == 0 and hooks == 0 and preference.auction_tooltips == false)
     check("foreign tooltip functions and callback registration are not replaced", GameTooltip == tt and ItemRefTooltip == tt
         and tt.AddDoubleLine == methods.AddDoubleLine and tt.ClearLines == methods.ClearLines and tt.SetText == methods.SetText
-        and TooltipDataProcessor.AddTooltipPostCall == postCall and provider.Tooltip.AddAuctionTip == foreignTip
+        and registrations == boots and provider.Tooltip.AddAuctionTip == foreignTip
         and provider.Config.Set == foreignSet)
     check("no read or write of the tooltip money frame or game Sell Price helpers", moneyTouch == 0)
+    check("one tooltip callback and one browse hook per load, nothing extra", boots > 0
+        and registrations == boots and browseHooks == boots, { boots .. " boots", registrations .. " registrations", browseHooks .. " browse hooks" })
+    check("no write to Auctionator tables or its saved settings, and none replaced", foreignWrites == 0
+        and AUCTIONATOR_CONFIG == account and AUCTIONATOR_CHARACTER_CONFIG == character
+        and account.auction_tooltips == false)
+    TooltipDataProcessor.AddTooltipPostCall = postCall
+    AUCTIONATOR_CONFIG, AUCTIONATOR_CHARACTER_CONFIG = oldAccount, oldCharacter
     GameTooltip_ClearMoney, SetTooltipMoney, GameTooltip_OnTooltipAddMoney = oldClearMoney, oldSetTooltipMoney, oldAddMoney
     S.time, time, IsShiftKeyDown, C_Container = oldTime, oldClock, oldShift, oldContainer
     GameTooltip, ItemRefTooltip, hooksecurefunc, Auctionator = oldGameTip, oldRefTip, oldHook, nil
